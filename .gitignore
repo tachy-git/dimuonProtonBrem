@@ -1,0 +1,25 @@
+# Local environment
+.env
+__pycache__/
+*.py[cod]
+
+# Physics data and job output
+*.root
+*.npy
+*.npz
+*.log
+*.out
+*.err
+*.part.*
+*.invalid.*
+
+# Generated batch state
+/condor/
+/sampleGeneration/condor/
+crab_projects/
+crab_*/
+
+# Editor and OS files
+*~
+*.swp
+.DS_Store

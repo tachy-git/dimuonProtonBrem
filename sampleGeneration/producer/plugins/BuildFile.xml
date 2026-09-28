@@ -1,0 +1,14 @@
+<use name="FWCore/Framework"/>
+<use name="FWCore/PluginManager"/>
+<use name="FWCore/ParameterSet"/>
+<use name="FWCore/ServiceRegistry"/>
+
+<use name="SimDataFormats/GeneratorProducts"/>
+<use name="HepMC"/>
+<use name="CLHEP"/>
+
+<use name="rootcore"/>
+<use name="rootmath"/>
+<use name="rootphysics"/>
+
+<flags EDM_PLUGIN="1"/>
