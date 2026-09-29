@@ -53,3 +53,19 @@ Paths can be provided directly:
 
 Run without `--dry-run` to submit the generated HTCondor job set. Optional
 arguments include `--max-events` and `--outdir`.
+
+By default, all generated files are written under `sampleGeneration/condor/`:
+
+```text
+condor/
+├── sub/
+├── log/
+├── stage_logs/
+├── gen_sim/
+├── gen_sim_raw/
+├── aodsim/
+├── miniaodsim/
+└── nanoaodsim/
+```
+
+Use `--outdir /path/to/output` to select a different location.

@@ -216,8 +216,8 @@ def main():
     if last_seed >= MAX_RNG_SEED:
         raise ValueError(f"seed allocation exceeds {MAX_RNG_SEED - 1}; reduce jobs or RNG_SEED_STRIDE")
 
-    logdir = outdir / "condor" / "log"
-    subdir = outdir / "condor" / "sub"
+    logdir = outdir / "log"
+    subdir = outdir / "sub"
     logdir.mkdir(parents=True, exist_ok=True)
     subdir.mkdir(parents=True, exist_ok=True)
     rows = []
