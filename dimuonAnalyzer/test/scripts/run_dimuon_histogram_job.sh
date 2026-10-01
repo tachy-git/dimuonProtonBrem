@@ -12,15 +12,16 @@ MAX_EVENTS="$3"
 
 SCRIPT_PATH="$(readlink -f "$0")"
 SCRIPT_DIR="$(cd "$(dirname "${SCRIPT_PATH}")" && pwd)"
-CMSSW_SRC="${DIMUON_CMSSW_SRC:-$(readlink -f "${SCRIPT_DIR}/../../../../CMSSW_15_1_0/src")}"
-ANALYZER="${SCRIPT_DIR}/make_dimuonAnalyzer_res_test.py"
+PROJECT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+CMSSW_SRC="${DIMUON_CMSSW_SRC:-$(readlink -f "${PROJECT_DIR}/../../../../CMSSW_15_1_0/src")}"
+ANALYZER="${SCRIPT_DIR}/make_dimuon_histograms.py"
 
 to_absolute() {
   local path="$1"
   if [[ "${path}" = /* ]]; then
     printf '%s\n' "${path}"
   else
-    readlink -f "${SCRIPT_DIR}/${path}"
+    readlink -f "${PROJECT_DIR}/${path}"
   fi
 }
 
