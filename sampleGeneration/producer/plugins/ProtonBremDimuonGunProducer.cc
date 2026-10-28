@@ -244,10 +244,26 @@ void ProtonBremDimuonGunProducer::produce(edm::StreamID, edm::Event& event, cons
   const double weight = events_.at(row, 16);
 
   const double lxy = lxy_;
-  const double phi = std::atan2(motherPy, motherPx);
-  const double vx = lxy * std::cos(phi);
-  const double vy = lxy * std::sin(phi);
-  const double vz = 0.0;
+  const double motherPt = std::hypot(motherPx, motherPy);
+  double vx = 0.0;
+  double vy = 0.0;
+  double vz = 0.0;
+  if (lxy != 0.0) {
+    if (!std::isfinite(lxy) || !std::isfinite(motherPx) || !std::isfinite(motherPy) ||
+        !std::isfinite(motherPz) || !std::isfinite(motherPt) || motherPt == 0.0) {
+      throw cms::Exception("ProtonBremDimuonGunProducer")
+          << "Cannot calculate vertex for event row " << row
+          << ": nonzero Lxy requires finite Lxy/mother momentum and nonzero mother pT";
+    }
+    const double phi = std::atan2(motherPy, motherPx);
+    vx = lxy * std::cos(phi);
+    vy = lxy * std::sin(phi);
+    vz = lxy * (motherPz / motherPt);
+    if (!std::isfinite(vx) || !std::isfinite(vy) || !std::isfinite(vz)) {
+      throw cms::Exception("ProtonBremDimuonGunProducer")
+          << "Nonfinite vertex coordinates for event row " << row;
+    }
+  }
   const double time = 0.0;
 
   auto genEvent = std::make_unique<HepMC::GenEvent>(HepMC::Units::GEV, HepMC::Units::MM);
