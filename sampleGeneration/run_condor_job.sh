@@ -12,18 +12,36 @@ MU_MINUS_PDG="${8:?negative-muon PDG ID missing}"
 MU_PLUS_PDG="${9:?positive-muon PDG ID missing}"
 CMSSW14="${10:?CMSSW 14 source directory missing}"
 CMSSW15="${11:?CMSSW 15 source directory missing}"
-SEED_STRIDE="${12:?RNG seed stride missing}"
+CMSSW16="${12:?CMSSW 16 source directory missing}"
+SEED_STRIDE="${13:?RNG seed stride missing}"
+SAMPLE_TYPE="${14:-signal}"
+case "$SAMPLE_TYPE" in signal|background) ;; *) echo "Invalid sample type: $SAMPLE_TYPE" >&2; exit 1 ;; esac
 
 WORKFLOW_DIR="$(cd "$(dirname "$0")" && pwd)"
 CFG_DIR="${WORKFLOW_DIR}/cfg"
-GEN_SIM="${OUTDIR}/gen_sim/${LABEL}_GEN_SIM.root"
-GEN_SIM_RAW="${OUTDIR}/gen_sim_raw/${LABEL}_GEN_SIM_RAW.root"
-AODSIM="${OUTDIR}/aodsim/${LABEL}_AODSIM.root"
-MINIAODSIM="${OUTDIR}/miniaodsim/${LABEL}_MINIAODSIM.root"
-NANOAODSIM="${OUTDIR}/nanoaodsim/${LABEL}_NANOAODSIM.root"
+# Keep the existing Condor argument/label format without a Python path helper.
+if [[ "$LABEL" =~ ^([A-Za-z0-9_.+/-]+)__chunk[0-9]+_lxy([0-9]+(p[0-9]+)?)$ ]] && [[ "$LABEL" != *".."* ]]; then
+  SETTING="${BASH_REMATCH[1]}_lxy${BASH_REMATCH[2]}"
+else
+  echo "[ERROR] invalid mass/Lxy job label: ${LABEL}" >&2
+  exit 1
+fi
+INPUT_NAME="${INPUT_NPY##*/}"
+if [[ ! "$INPUT_NAME" =~ ^Events_[0-9]+\.npy$ ]]; then
+  echo "[ERROR] expected Events_<n>.npy input: ${INPUT_NPY}" >&2
+  exit 1
+fi
+ROOT_NAME="${INPUT_NAME%.npy}.root"
+GEN_SIM="${OUTDIR}/gen_sim/${SETTING}/${ROOT_NAME}"
+GEN_SIM_RAW="${OUTDIR}/gen_sim_raw/${SETTING}/${ROOT_NAME}"
+AODSIM="${OUTDIR}/aodsim/${SETTING}/${ROOT_NAME}"
+MINIAODSIM="${OUTDIR}/miniaodsim/${SETTING}/${ROOT_NAME}"
+NANOAODSIM="${OUTDIR}/nanoaodsim/${SETTING}/${ROOT_NAME}"
+EXONANOAODSIM="${OUTDIR}/exonanoaodsim/${SETTING}/${ROOT_NAME}"
 STAGE_LOG="${OUTDIR}/stage_logs"
-mkdir -p "${OUTDIR}/gen_sim" "${OUTDIR}/gen_sim_raw" "${OUTDIR}/aodsim" \
-         "${OUTDIR}/miniaodsim" "${OUTDIR}/nanoaodsim" "$STAGE_LOG"
+mkdir -p "${OUTDIR}/gen_sim/${SETTING}" "${OUTDIR}/gen_sim_raw/${SETTING}" "${OUTDIR}/aodsim/${SETTING}" \
+         "${OUTDIR}/miniaodsim/${SETTING}" "${OUTDIR}/nanoaodsim/${SETTING}" \
+         "${OUTDIR}/exonanoaodsim/${SETTING}" "$STAGE_LOG"
 
 source /cvmfs/cms.cern.ch/cmsset_default.sh
 
@@ -33,9 +51,30 @@ activate_release() {
   eval "$(scram runtime -sh)"
 }
 
+valid_root_file() {
+  local path="$1"
+  [ -s "$path" ] || return 1
+  python3 - "$path" >/dev/null 2>&1 <<'PY'
+import sys
+import ROOT
+
+ROOT.gROOT.SetBatch(True)
+root_file = ROOT.TFile.Open(sys.argv[1])
+valid = bool(
+    root_file
+    and not root_file.IsZombie()
+    and not root_file.TestBit(ROOT.TFile.kRecovered)
+    and root_file.Get("Events")
+)
+if root_file:
+    root_file.Close()
+raise SystemExit(0 if valid else 1)
+PY
+}
+
 valid_edm_file() {
   local path="$1"
-  [ -s "$path" ] && edmFileUtil "$path" >/dev/null 2>&1
+  valid_root_file "$path" && edmFileUtil "$path" >/dev/null 2>&1
 }
 
 preserve_invalid() {
@@ -68,7 +107,7 @@ run_stage() {
   local run_stamp temporary_output log status
   run_stamp="$(date +%Y%m%d_%H%M%S)"
   temporary_output="${final_output}.part.$$"
-  log="${STAGE_LOG}/${LABEL}_${name}_${run_stamp}.log"
+  log="${STAGE_LOG}/${LABEL//\//__}_${name}_${run_stamp}.log"
   preserve_invalid "$temporary_output" "stale ${name} temporary output"
   echo "[RUN] ${name} start: $(date) on $(hostname)"
   if cmsRun "$cfg" "$@" outputFile="$temporary_output" 2>&1 | tee "$log"; then
@@ -95,23 +134,59 @@ run_stage() {
 
 echo "[INFO] label=${LABEL} input=${INPUT_NPY} lxy=${LXY} events=${EVENTS} seed=${SEED}"
 activate_release "$CMSSW15"
-if valid_edm_file "$NANOAODSIM"; then
-  echo "[SKIP] final NANOAODSIM is valid; workflow complete: ${NANOAODSIM}"
+if valid_edm_file "$NANOAODSIM" && valid_edm_file "$EXONANOAODSIM"; then
+  echo "[SKIP] both final outputs are valid; workflow complete"
+  echo "[INFO] NANOAODSIM: ${NANOAODSIM}"
+  echo "[INFO] EXONANOAODSIM: ${EXONANOAODSIM}"
   exit 0
 fi
 
-activate_release "$CMSSW14"
-run_stage gen_sim "$GEN_SIM" "" "${CFG_DIR}/gen_sim_cfg.py" \
-  maxEvents="$EVENTS" inputNpy="$INPUT_NPY" lxy="$LXY" seed="$SEED" \
-  motherPdgId="$MOTHER_PDG" muMinusPdgId="$MU_MINUS_PDG" muPlusPdgId="$MU_PLUS_PDG"
-run_stage digi_hlt "$GEN_SIM_RAW" "$GEN_SIM" "${CFG_DIR}/digi_hlt_cfg.py" \
-  maxEvents="$EVENTS" inputFile="$GEN_SIM" seed="$((SEED + SEED_STRIDE))"
-run_stage reco "$AODSIM" "$GEN_SIM_RAW" "${CFG_DIR}/reco_cfg.py" \
-  maxEvents="$EVENTS" inputFile="$GEN_SIM_RAW" seed="$((SEED + 2 * SEED_STRIDE))"
+need_aod=0
+if ! valid_edm_file "$EXONANOAODSIM"; then
+  need_aod=1
+fi
+if ! valid_edm_file "$NANOAODSIM" && ! valid_edm_file "$MINIAODSIM"; then
+  need_aod=1
+fi
 
-activate_release "$CMSSW15"
-run_stage miniaod "$MINIAODSIM" "$AODSIM" "${CFG_DIR}/miniaod_cfg.py" \
-  maxEvents="$EVENTS" inputFile="$AODSIM" seed="$((SEED + 3 * SEED_STRIDE))"
-run_stage nanoaod "$NANOAODSIM" "$MINIAODSIM" "${CFG_DIR}/nanoaod_cfg.py" \
-  maxEvents="$EVENTS" inputFile="$MINIAODSIM" seed="$((SEED + 4 * SEED_STRIDE))"
-echo "[DONE] complete: ${NANOAODSIM}"
+if [ "$need_aod" -eq 1 ]; then
+  if valid_edm_file "$AODSIM"; then
+    echo "[SKIP] reco: valid output already exists: ${AODSIM}"
+    echo "[SKIP] gen_sim/digi_hlt: valid downstream AODSIM makes upstream outputs unnecessary"
+  else
+    activate_release "$CMSSW14"
+    if valid_edm_file "$GEN_SIM_RAW"; then
+      echo "[SKIP] digi_hlt: valid output already exists: ${GEN_SIM_RAW}"
+      echo "[SKIP] gen_sim: valid downstream GEN-SIM-RAW makes its input unnecessary"
+    else
+      run_stage gen_sim "$GEN_SIM" "" "${CFG_DIR}/gen_sim_cfg.py" \
+        maxEvents="$EVENTS" inputNpy="$INPUT_NPY" sampleType="$SAMPLE_TYPE" lxy="$LXY" seed="$SEED" \
+        motherPdgId="$MOTHER_PDG" muMinusPdgId="$MU_MINUS_PDG" muPlusPdgId="$MU_PLUS_PDG"
+      run_stage digi_hlt "$GEN_SIM_RAW" "$GEN_SIM" "${CFG_DIR}/digi_hlt_cfg.py" \
+        maxEvents="$EVENTS" inputFile="$GEN_SIM" seed="$((SEED + SEED_STRIDE))"
+    fi
+    run_stage reco "$AODSIM" "$GEN_SIM_RAW" "${CFG_DIR}/reco_cfg.py" \
+      maxEvents="$EVENTS" inputFile="$GEN_SIM_RAW" seed="$((SEED + 2 * SEED_STRIDE))"
+  fi
+fi
+
+if valid_edm_file "$NANOAODSIM"; then
+  echo "[SKIP] nanoaod: valid output already exists: ${NANOAODSIM}"
+else
+  activate_release "$CMSSW15"
+  run_stage miniaod "$MINIAODSIM" "$AODSIM" "${CFG_DIR}/miniaod_cfg.py" \
+    maxEvents="$EVENTS" inputFile="$AODSIM" seed="$((SEED + 3 * SEED_STRIDE))"
+  run_stage nanoaod "$NANOAODSIM" "$MINIAODSIM" "${CFG_DIR}/nanoaod_cfg.py" \
+    maxEvents="$EVENTS" inputFile="$MINIAODSIM" seed="$((SEED + 4 * SEED_STRIDE))"
+fi
+
+if valid_edm_file "$EXONANOAODSIM"; then
+  echo "[SKIP] exonanoaod: valid output already exists: ${EXONANOAODSIM}"
+else
+  activate_release "$CMSSW16"
+  run_stage exonanoaod "$EXONANOAODSIM" "$AODSIM" "${CFG_DIR}/exonanoaod_cfg.py" \
+    maxEvents="$EVENTS" inputFile="$AODSIM"
+fi
+
+echo "[DONE] NANOAODSIM: ${NANOAODSIM}"
+echo "[DONE] EXONANOAODSIM: ${EXONANOAODSIM}"

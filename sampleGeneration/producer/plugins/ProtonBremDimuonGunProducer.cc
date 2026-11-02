@@ -120,7 +120,7 @@ std::vector<double> readPayload(std::ifstream& input, std::size_t count) {
   return data;
 }
 
-NpyArray readNpyArray(const std::string& path) {
+NpyArray readNpyArray(const std::string& path, std::size_t minColumns) {
   std::ifstream input(path, std::ios::binary);
   if (!input) {
     throw std::runtime_error("Could not open " + path);
@@ -163,8 +163,8 @@ NpyArray readNpyArray(const std::string& path) {
   if (shape.size() != 2) {
     throw std::runtime_error("Expected a 2D NPY array");
   }
-  if (shape[1] < 17) {
-    throw std::runtime_error("Expected at least 17 columns in the NPY array");
+  if (shape[0] == 0 || shape[1] < minColumns) {
+    throw std::runtime_error("Empty NPY array or insufficient columns for sample type");
   }
 
   const auto count = shape[0] * shape[1];
@@ -195,6 +195,7 @@ public:
 private:
   std::string npyFile_;
   NpyArray events_;
+  bool background_;
 
   int motherId_;
   int muMinusId_;
@@ -205,13 +206,18 @@ private:
 
 ProtonBremDimuonGunProducer::ProtonBremDimuonGunProducer(const edm::ParameterSet& pset)
     : npyFile_(pset.getParameter<std::string>("NpyFile")),
+      background_(pset.getParameter<std::string>("SampleType") == "background"),
       motherId_(pset.getParameter<int>("MotherPdgId")),
       muMinusId_(pset.getParameter<int>("MuMinusPdgId")),
       muPlusId_(pset.getParameter<int>("MuPlusPdgId")),
       lxy_(pset.getParameter<double>("Lxy")),
       verbosity_(pset.getUntrackedParameter<int>("Verbosity", 0)) {
+  const auto sampleType = pset.getParameter<std::string>("SampleType");
+  if (sampleType != "signal" && sampleType != "background") {
+    throw cms::Exception("Configuration") << "SampleType must be signal or background";
+  }
   try {
-    events_ = readNpyArray(npyFile_);
+    events_ = readNpyArray(npyFile_, background_ ? 13 : 17);
   } catch (const std::exception& err) {
     throw cms::Exception("ProtonBremDimuonGunProducer") << "Failed to read " << npyFile_ << ": " << err.what();
   }
@@ -227,38 +233,38 @@ void ProtonBremDimuonGunProducer::produce(edm::StreamID, edm::Event& event, cons
         << "Requested event row " << row << " but " << npyFile_ << " has only " << events_.rows << " rows";
   }
 
-  const double motherE = events_.at(row, 4);
-  const double motherPx = events_.at(row, 5);
-  const double motherPy = events_.at(row, 6);
-  const double motherPz = events_.at(row, 7);
+  // Proton momentum for signal; meson momentum for background. Used only
+  // to locate the common displaced vertex, not to set muon momenta.
+  const double referencePx = events_.at(row, 1);
+  const double referencePy = events_.at(row, 2);
+  const double referencePz = events_.at(row, 3);
 
-  const double mu1E = events_.at(row, 8);
-  const double mu1Px = events_.at(row, 9);
-  const double mu1Py = events_.at(row, 10);
-  const double mu1Pz = events_.at(row, 11);
-
-  const double mu2E = events_.at(row, 12);
-  const double mu2Px = events_.at(row, 13);
-  const double mu2Py = events_.at(row, 14);
-  const double mu2Pz = events_.at(row, 15);
-  const double weight = events_.at(row, 16);
+  const std::size_t muOffset = background_ ? 4 : 8;
+  const double mu1E = events_.at(row, muOffset);
+  const double mu1Px = events_.at(row, muOffset + 1);
+  const double mu1Py = events_.at(row, muOffset + 2);
+  const double mu1Pz = events_.at(row, muOffset + 3);
+  const double mu2E = events_.at(row, muOffset + 4);
+  const double mu2Px = events_.at(row, muOffset + 5);
+  const double mu2Py = events_.at(row, muOffset + 6);
+  const double mu2Pz = events_.at(row, muOffset + 7);
+  const double weight = events_.at(row, background_ ? 12 : 16);
 
   const double lxy = lxy_;
-  const double motherPt = std::hypot(motherPx, motherPy);
+  const double referencePt = std::hypot(referencePx, referencePy);
   double vx = 0.0;
   double vy = 0.0;
   double vz = 0.0;
   if (lxy != 0.0) {
-    if (!std::isfinite(lxy) || !std::isfinite(motherPx) || !std::isfinite(motherPy) ||
-        !std::isfinite(motherPz) || !std::isfinite(motherPt) || motherPt == 0.0) {
+    if (!std::isfinite(lxy) || !std::isfinite(referencePx) || !std::isfinite(referencePy) ||
+        !std::isfinite(referencePz) || !std::isfinite(referencePt) || referencePt == 0.0) {
       throw cms::Exception("ProtonBremDimuonGunProducer")
           << "Cannot calculate vertex for event row " << row
-          << ": nonzero Lxy requires finite Lxy/mother momentum and nonzero mother pT";
+          << ": nonzero Lxy requires finite reference momentum and nonzero reference pT";
     }
-    const double phi = std::atan2(motherPy, motherPx);
-    vx = lxy * std::cos(phi);
-    vy = lxy * std::sin(phi);
-    vz = lxy * (motherPz / motherPt);
+    vx = lxy * (referencePx / referencePt);
+    vy = lxy * (referencePy / referencePt);
+    vz = lxy * (referencePz / referencePt);
     if (!std::isfinite(vx) || !std::isfinite(vy) || !std::isfinite(vz)) {
       throw cms::Exception("ProtonBremDimuonGunProducer")
           << "Nonfinite vertex coordinates for event row " << row;
@@ -271,13 +277,16 @@ void ProtonBremDimuonGunProducer::produce(edm::StreamID, edm::Event& event, cons
   genEvent->set_signal_process_id(20);
   genEvent->weights().push_back(weight);
 
-  auto* vProd = new HepMC::GenVertex(HepMC::FourVector(vx, vy, vz, time));
-  auto* mother = new HepMC::GenParticle(HepMC::FourVector(motherPx, motherPy, motherPz, motherE), motherId_, 2);
-  vProd->add_particle_out(mother);
-  genEvent->add_vertex(vProd);
-
   auto* vDec = new HepMC::GenVertex(HepMC::FourVector(vx, vy, vz, time));
-  vDec->add_particle_in(mother);
+  if (!background_) {
+    auto* vProd = new HepMC::GenVertex(HepMC::FourVector(vx, vy, vz, time));
+    auto* mother = new HepMC::GenParticle(
+        HepMC::FourVector(events_.at(row, 5), events_.at(row, 6), events_.at(row, 7), events_.at(row, 4)),
+        motherId_, 2);
+    vProd->add_particle_out(mother);
+    genEvent->add_vertex(vProd);
+    vDec->add_particle_in(mother);
+  }
 
   auto* muPlus = new HepMC::GenParticle(HepMC::FourVector(mu1Px, mu1Py, mu1Pz, mu1E), muPlusId_, 1);
   auto* muMinus = new HepMC::GenParticle(HepMC::FourVector(mu2Px, mu2Py, mu2Pz, mu2E), muMinusId_, 1);
@@ -301,6 +310,7 @@ void ProtonBremDimuonGunProducer::produce(edm::StreamID, edm::Event& event, cons
 void ProtonBremDimuonGunProducer::fillDescriptions(edm::ConfigurationDescriptions& descriptions) {
   edm::ParameterSetDescription desc;
   desc.add<std::string>("NpyFile", "");
+  desc.add<std::string>("SampleType", "signal");
   desc.add<int>("MotherPdgId", 999999);
   desc.add<int>("MuMinusPdgId", 13);
   desc.add<int>("MuPlusPdgId", -13);

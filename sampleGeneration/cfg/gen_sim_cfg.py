@@ -8,7 +8,7 @@ from FWCore.ParameterSet.VarParsing import VarParsing
 from Configuration.Eras.Era_Run3_2024_cff import Run3_2024
 
 
-def npy_rows(path):
+def npy_rows(path, sample_type):
     with open(path, "rb") as handle:
         if handle.read(6) != b"\x93NUMPY":
             raise RuntimeError("%s is not an NPY file" % path)
@@ -23,8 +23,9 @@ def npy_rows(path):
             raise RuntimeError("Unsupported NPY version %d" % version[0])
         header = ast.literal_eval(handle.read(length).decode("latin1"))
     shape = header.get("shape")
-    if len(shape) != 2 or shape[0] < 1 or shape[1] < 17:
-        raise RuntimeError("Expected a nonempty 2D NPY array with at least 17 columns")
+    columns = 13 if sample_type == "background" else 17
+    if len(shape) != 2 or shape[0] < 1 or shape[1] < columns:
+        raise RuntimeError("Invalid array dimensions for selected sample type")
     return int(shape[0])
 
 
@@ -32,15 +33,18 @@ options = VarParsing()
 options.register("maxEvents", -1, VarParsing.multiplicity.singleton, VarParsing.varType.int, "deprecated; NPY row count is always used")
 options.register("inputNpy", "", VarParsing.multiplicity.singleton, VarParsing.varType.string, "input NPY file")
 options.register("lxy", 0.0, VarParsing.multiplicity.singleton, VarParsing.varType.float, "transverse decay length in mm")
-options.register("motherPdgId", 999999, VarParsing.multiplicity.singleton, VarParsing.varType.int, "mother PDG ID")
+options.register("motherPdgId", 999999, VarParsing.multiplicity.singleton, VarParsing.varType.int, "dark photon mother PDG ID")
 options.register("muMinusPdgId", 13, VarParsing.multiplicity.singleton, VarParsing.varType.int, "negative-muon PDG ID")
 options.register("muPlusPdgId", -13, VarParsing.multiplicity.singleton, VarParsing.varType.int, "positive-muon PDG ID")
 options.register("outputFile", "output.root", VarParsing.multiplicity.singleton, VarParsing.varType.string, "output ROOT file")
 options.register("seed", 1, VarParsing.multiplicity.singleton, VarParsing.varType.int, "base RNG seed")
+options.register("sampleType", "signal", VarParsing.multiplicity.singleton, VarParsing.varType.string, "signal or background")
 options.parseArguments()
+if options.sampleType not in ("signal", "background"):
+    raise RuntimeError("sampleType must be signal or background")
 if not options.inputNpy:
     raise RuntimeError("inputNpy=/path/to/chunk.npy is required")
-rows = npy_rows(options.inputNpy)
+rows = npy_rows(options.inputNpy, options.sampleType)
 events = rows
 
 process = cms.Process("SIM", Run3_2024)
@@ -69,6 +73,7 @@ process.GlobalTag = GlobalTag(process.GlobalTag, "140X_mcRun3_2024_design_v11", 
 process.generator = cms.EDProducer(
     "ProtonBremDimuonGunProducer",
     NpyFile=cms.string(options.inputNpy),
+    SampleType=cms.string(options.sampleType),
     MotherPdgId=cms.int32(options.motherPdgId),
     MuMinusPdgId=cms.int32(options.muMinusPdgId),
     MuPlusPdgId=cms.int32(options.muPlusPdgId),

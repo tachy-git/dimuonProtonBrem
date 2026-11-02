@@ -10,15 +10,40 @@ import struct
 import subprocess
 from collections import defaultdict
 from pathlib import Path
+from typing import NamedTuple
 
 import settings
 
 
-CHUNK_RE = re.compile(r"^(?P<category>[A-Za-z0-9_.-]+)__chunk(?P<chunk>[0-9]{4})\.npy$")
+CHUNK_RE = re.compile(r"^Events_(?P<chunk>[0-9]+)\.npy$")
+CATEGORY_RE = re.compile(r"^(?:barrel|endcap)_m_[0-9.eE+\-]+_GeV$")
 MAX_RNG_SEED = 900_000_000
+NPY_ITEM_SIZES = {"<f4": 4, "|f4": 4, "=f4": 4, "<f8": 8, "|f8": 8, "=f8": 8}
 
 
-def inspect_npy(path):
+class InputChunk(NamedTuple):
+    path: Path
+    category: str
+    chunk: int
+    category_index: int
+    rows: int
+
+
+class Job(NamedTuple):
+    path: Path
+    category: str
+    lxy: float
+    label: str
+    events: int
+
+
+def chunk_limit(configured, additional):
+    if additional is None:
+        return configured
+    return additional if configured is None else min(configured, additional)
+
+
+def inspect_npy(path, sample_type="signal", allow_empty=False):
     """Return (rows, columns, dtype) after validating a supported NPY file."""
     with path.open("rb") as handle:
         if handle.read(6) != b"\x93NUMPY":
@@ -54,14 +79,14 @@ def inspect_npy(path):
         raise ValueError(f"expected a two-dimensional array, got shape {shape!r}")
     if not all(isinstance(value, int) and value >= 0 for value in shape):
         raise ValueError(f"invalid shape {shape!r}")
-    if shape[0] < 1 or shape[1] < 17:
-        raise ValueError(f"expected at least one row and 17 columns, got {shape!r}")
+    columns = 13 if sample_type == "background" else 17
+    if (not allow_empty and shape[0] < 1) or shape[1] < columns:
+        raise ValueError(f"expected {columns} columns and a nonempty array, got {shape!r}")
     if header.get("fortran_order") is not False:
         raise ValueError("array must be C-contiguous")
-    item_sizes = {"<f4": 4, "|f4": 4, "=f4": 4, "<f8": 8, "|f8": 8, "=f8": 8}
-    if dtype not in item_sizes:
+    if dtype not in NPY_ITEM_SIZES:
         raise ValueError(f"unsupported dtype {dtype!r}; use little-endian/native float32 or float64")
-    expected_size = payload_offset + shape[0] * shape[1] * item_sizes[dtype]
+    expected_size = payload_offset + shape[0] * shape[1] * NPY_ITEM_SIZES[dtype]
     if path.stat().st_size != expected_size:
         raise ValueError(f"file size does not match shape and dtype (expected {expected_size} bytes)")
     return shape[0], shape[1], dtype
@@ -71,67 +96,87 @@ def lxy_tag(value):
     return format(value, ".12g").replace("-", "m").replace(".", "p")
 
 
-def matches_input_patterns(path):
-    return any(fnmatch.fnmatchcase(path.name, pattern) for pattern in settings.NPY_FILENAME_PATTERNS)
+def input_identity(path, sample_type="signal"):
+    match = CHUNK_RE.fullmatch(path.name)
+    category = path.parent.name
+    if sample_type == "background":
+        category = path.parent.parent.name + "/" + category
+        if not match or not all(re.fullmatch(r"[A-Za-z0-9_.+-]+", part) for part in category.split("/")):
+            raise ValueError(f"invalid background chunk path: {path}")
+        return category, int(match.group("chunk"))
+    if not match or not CATEGORY_RE.fullmatch(category):
+        raise ValueError(f"invalid input path {path}; expected <barrel/endcap_m_MASS_GeV>/Events_<n>.npy")
+    return category, int(match.group("chunk"))
 
 
-def collect_inputs(arguments):
-    found = []
+def matches_input_patterns(path, sample, sample_type="signal"):
+    category = path.parent.parent.name if sample_type == "background" else path.parent.name
+    return any(fnmatch.fnmatchcase(category, pattern) for pattern in sample["category_patterns"])
+
+
+def collect_inputs(arguments, sample, sample_type="signal"):
+    found = set()
     for argument in arguments:
         path = argument.expanduser().resolve()
         if path.is_dir():
-            found.extend(candidate for candidate in sorted(path.glob("*.npy")) if matches_input_patterns(candidate))
+            for candidate in path.rglob("*.npy"):
+                if candidate.is_file() and matches_input_patterns(candidate, sample, sample_type):
+                    input_identity(candidate, sample_type)
+                    found.add(candidate.resolve())
         elif path.is_file():
-            if not matches_input_patterns(path):
+            input_identity(path, sample_type)
+            if not matches_input_patterns(path, sample, sample_type):
                 raise ValueError(
-                    f"input does not match NPY_FILENAME_PATTERNS {settings.NPY_FILENAME_PATTERNS!r}: {path}"
+                    f"input category does not match NPY_CATEGORY_PATTERNS {sample['category_patterns']!r}: {path}"
                 )
-            found.append(path)
+            found.add(path)
         else:
             raise ValueError(f"input does not exist: {path}")
-    unique = []
-    seen = set()
+    if not found:
+        raise ValueError("no Events_<n>.npy files found for NPY_CATEGORY_PATTERNS")
+    identities = {}
     for path in found:
-        resolved = path.resolve()
-        if resolved not in seen:
-            seen.add(resolved)
-            unique.append(resolved)
-    if not unique:
-        raise ValueError("no NPY files found")
-    return unique
+        identity = input_identity(path, sample_type)
+        if identity in identities:
+            raise ValueError(f"duplicate category/chunk {identity}: {identities[identity]} and {path}")
+        identities[identity] = path
+    return [identities[key] for key in sorted(identities)]
 
 
-def validate_settings(cmssw14_src, cmssw15_src):
-    if not settings.NPY_FILENAME_PATTERNS or not all(
-        isinstance(pattern, str) and pattern for pattern in settings.NPY_FILENAME_PATTERNS
+def validate_selection_settings(sample):
+    if not sample["category_patterns"] or not all(
+        isinstance(pattern, str) and pattern for pattern in sample["category_patterns"]
     ):
-        raise ValueError("NPY_FILENAME_PATTERNS must contain at least one nonempty filename pattern")
-    if not settings.LXY_VALUES_MM:
+        raise ValueError("NPY_CATEGORY_PATTERNS must contain at least one nonempty category pattern")
+    if not sample["max_chunks_by_lxy"]:
         raise ValueError("LXY_VALUES_MM must not be empty")
-    if len(set(settings.LXY_VALUES_MM)) != len(settings.LXY_VALUES_MM):
-        raise ValueError("LXY_VALUES_MM must not contain duplicates")
-    for lxy in settings.LXY_VALUES_MM:
+    for lxy in sample["max_chunks_by_lxy"]:
         if not isinstance(lxy, (int, float)) or not math.isfinite(lxy) or lxy < 0:
             raise ValueError(f"invalid Lxy value: {lxy!r}")
-    limits = settings.MAX_CHUNKS_PER_CATEGORY_BY_LXY
-    if set(limits) != set(settings.LXY_VALUES_MM):
-        raise ValueError("MAX_CHUNKS_PER_CATEGORY_BY_LXY must have exactly one entry for every Lxy value")
+    limits = sample["max_chunks_by_lxy"]
     for lxy, limit in limits.items():
         if limit is not None and (not isinstance(limit, int) or isinstance(limit, bool) or limit < 1):
             raise ValueError(f"invalid per-category chunk limit for Lxy {lxy}: {limit!r}")
-    if not 1 <= settings.BASE_SEED < MAX_RNG_SEED:
+
+
+def validate_settings(cmssw14_src, cmssw15_src, cmssw16_src, common, sample):
+    validate_selection_settings(sample)
+    if not 1 <= common["base_seed"] < MAX_RNG_SEED:
         raise ValueError("BASE_SEED must be in [1, 899999999]")
-    if settings.RNG_SEED_STRIDE < 1:
+    if common["rng_seed_stride"] < 1:
         raise ValueError("RNG_SEED_STRIDE must be positive")
-    if settings.REQUEST_CPUS < 1:
+    if common["request_cpus"] < 1:
         raise ValueError("REQUEST_CPUS must be positive")
-    if not settings.REQUEST_MEMORY:
+    if not common["request_memory"]:
         raise ValueError("REQUEST_MEMORY must not be empty")
-    for name, value in (("CMSSW 14 source", cmssw14_src), ("CMSSW 15 source", cmssw15_src)):
+    for name, value in (
+        ("CMSSW 14 source", cmssw14_src),
+        ("CMSSW 15 source", cmssw15_src),
+        ("CMSSW 16 source", cmssw16_src),
+    ):
         if not value:
             raise ValueError(
-                f"{name} is not configured; use the matching --cmssw*-src option "
-                "or set DIMUON_CMSSW_BASE"
+                f"{name} is not configured; set its path in settings.py or DIMUON_CMSSW_BASE"
             )
         release = Path(value).expanduser().resolve()
         if not release.is_dir():
@@ -139,94 +184,62 @@ def validate_settings(cmssw14_src, cmssw15_src):
         if any(character.isspace() for character in str(release)):
             raise ValueError(f"{name} must not contain whitespace: {release}")
     for name in ("MOTHER_PDG_ID", "MU_MINUS_PDG_ID", "MU_PLUS_PDG_ID"):
-        if not isinstance(getattr(settings, name), int) or getattr(settings, name) == 0:
+        if not isinstance(common[name.lower()], int) or common[name.lower()] == 0:
             raise ValueError(f"{name} must be a nonzero integer")
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("inputs", nargs="*", type=Path, help="NPY chunk files or directories")
-    parser.add_argument("--input-dir", type=Path, help="default NPY directory (alternative to positional inputs)")
-    parser.add_argument("--cmssw14-src", type=Path, help="CMSSW_14_0_18 src directory")
-    parser.add_argument("--cmssw15-src", type=Path, help="CMSSW_15_0_2 src directory")
-    parser.add_argument("--dry-run", action="store_true", help="prepare files without submitting")
-    parser.add_argument("--max-events", type=int, default=-1, help="maximum events per chunk; -1 means all")
-    parser.add_argument(
-        "--max-jobs-per-category", type=int,
-        help="apply an additional per-category chunk cap to every Lxy value",
-    )
-    parser.add_argument("--outdir", type=Path, help="output base (default: ./condor)")
-    args = parser.parse_args()
+def add_sample_arguments(parser):
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("--signal", action="store_true", help="signal input (default)")
+    group.add_argument("--background", action="store_true", help="meson background input; Lxy 1800 mm")
 
-    if args.max_events == 0 or args.max_events < -1:
-        parser.error("--max-events must be -1 or a positive integer")
-    if args.max_jobs_per_category is not None and args.max_jobs_per_category < 1:
-        parser.error("--max-jobs-per-category must be positive")
 
-    if args.inputs and args.input_dir:
-        parser.error("use positional inputs or --input-dir, not both")
-
-    cmssw14_src = args.cmssw14_src or settings.CMSSW14_SRC
-    cmssw15_src = args.cmssw15_src or settings.CMSSW15_SRC
-    validate_settings(cmssw14_src, cmssw15_src)
-    cmssw14_src = Path(cmssw14_src).expanduser().resolve()
-    cmssw15_src = Path(cmssw15_src).expanduser().resolve()
-    here = Path(__file__).resolve().parent
-    outdir = (args.outdir or here / "condor").expanduser().resolve()
-    if any(character.isspace() for character in str(outdir)):
-        raise ValueError(f"output path must not contain whitespace: {outdir}")
-    configured_input = args.input_dir or settings.DEFAULT_NPY_DIRECTORY
-    if not args.inputs and not configured_input:
-        parser.error("provide NPY inputs, --input-dir, or DIMUON_NPY_DIR")
-    inputs = collect_inputs(args.inputs or [Path(configured_input)])
-
+def inspect_inputs(inputs, sample_type):
     selected = []
     counts = defaultdict(int)
-    metadata = {}
     for path in inputs:
-        match = CHUNK_RE.fullmatch(path.name)
-        if not match:
-            raise ValueError(f"invalid chunk name {path.name!r}; expected <category>__chunkNNNN.npy")
-        category = match.group("category")
+        category, chunk = input_identity(path, sample_type)
         try:
-            metadata[path] = inspect_npy(path)
+            rows, _, _ = inspect_npy(path, sample_type)
         except ValueError as error:
             raise ValueError(f"invalid input {path}: {error}") from error
-        selected.append((path, category, counts[category]))
-        counts[category] += 1
+        selection_category = category.split("/")[0]
+        selected.append(InputChunk(path, category, chunk, counts[selection_category], rows))
+        counts[selection_category] += 1
     if not selected:
         raise ValueError("no chunks selected")
 
+    return selected
+
+
+def build_jobs(selected, common, sample, additional_limit=None):
     jobs = []
-    jobs_by_lxy = defaultdict(int)
-    for path, category, category_index in selected:
-        rows = metadata[path][0]
-        events = rows if args.max_events < 0 else min(rows, args.max_events)
-        for lxy in settings.LXY_VALUES_MM:
-            limit = settings.MAX_CHUNKS_PER_CATEGORY_BY_LXY[lxy]
-            if args.max_jobs_per_category is not None:
-                limit = args.max_jobs_per_category if limit is None else min(limit, args.max_jobs_per_category)
+    jobs_by_category_lxy = defaultdict(int)
+    for path, category, chunk, category_index, rows in selected:
+        events = rows if common["max_events"] < 0 else min(rows, common["max_events"])
+        for lxy in sample["max_chunks_by_lxy"]:
+            limit = chunk_limit(sample["max_chunks_by_lxy"][lxy], additional_limit)
             if limit is not None and category_index >= limit:
                 continue
-            label = f"{path.stem}_lxy{lxy_tag(lxy)}"
-            jobs.append((path, category, float(lxy), label, events))
-            jobs_by_lxy[float(lxy)] += 1
+            label = f"{category}__chunk{chunk:04d}_lxy{lxy_tag(lxy)}"
+            jobs.append(Job(path, category, float(lxy), label, events))
+            jobs_by_category_lxy[(category, float(lxy))] += 1
 
-    last_seed = settings.BASE_SEED + (len(jobs) * 5 - 1) * settings.RNG_SEED_STRIDE
-    if last_seed >= MAX_RNG_SEED:
-        raise ValueError(f"seed allocation exceeds {MAX_RNG_SEED - 1}; reduce jobs or RNG_SEED_STRIDE")
+    return jobs, jobs_by_category_lxy
 
+
+def write_condor_files(jobs, here, outdir, common, sample_type, releases):
     logdir = outdir / "log"
     subdir = outdir / "sub"
     logdir.mkdir(parents=True, exist_ok=True)
     subdir.mkdir(parents=True, exist_ok=True)
     rows = []
     for index, (path, _category, lxy, label, events) in enumerate(jobs):
-        seed = settings.BASE_SEED + index * 5 * settings.RNG_SEED_STRIDE
+        seed = common["base_seed"] + index * 5 * common["rng_seed_stride"]
         rows.append(" ".join(map(str, (
             path, lxy, label, events, seed, outdir,
-            settings.MOTHER_PDG_ID, settings.MU_MINUS_PDG_ID, settings.MU_PLUS_PDG_ID,
-            cmssw14_src, cmssw15_src, settings.RNG_SEED_STRIDE,
+            common["mother_pdg_id"], common["mu_minus_pdg_id"], common["mu_plus_pdg_id"],
+            *releases, common["rng_seed_stride"], sample_type,
         ))))
 
     joblist = subdir / "dimuon_proton_brem_jobs.args"
@@ -234,7 +247,7 @@ def main():
     joblist.write_text("\n".join(rows) + "\n")
     submit.write_text(f"""universe = vanilla
 executable = {here / 'run_condor_job.sh'}
-arguments = $(input_npy) $(lxy) $(label) $(events) $(seed) $(outdir) $(mother_pdg) $(mu_minus_pdg) $(mu_plus_pdg) $(cmssw14) $(cmssw15) $(seed_stride)
+arguments = $(input_npy) $(lxy) $(label) $(events) $(seed) $(outdir) $(mother_pdg) $(mu_minus_pdg) $(mu_plus_pdg) $(cmssw14) $(cmssw15) $(cmssw16) $(seed_stride) $(sample_type)
 
 output = {logdir}/job.$(Cluster).$(Process).out
 error = {logdir}/job.$(Cluster).$(Process).err
@@ -243,17 +256,65 @@ accounting_group = group_cms
 stream_output = True
 stream_error = True
 should_transfer_files = NO
-request_cpus = {settings.REQUEST_CPUS}
-request_memory = {settings.REQUEST_MEMORY}
+request_cpus = {common['request_cpus']}
+request_memory = {common['request_memory']}
 
-queue input_npy,lxy,label,events,seed,outdir,mother_pdg,mu_minus_pdg,mu_plus_pdg,cmssw14,cmssw15,seed_stride from {joblist}
+queue input_npy,lxy,label,events,seed,outdir,mother_pdg,mu_minus_pdg,mu_plus_pdg,cmssw14,cmssw15,cmssw16,seed_stride,sample_type from {joblist}
 """)
-    print(f"Validated {len(selected)} chunks across {len(counts)} categories")
-    for lxy in settings.LXY_VALUES_MM:
-        print(f"Lxy {float(lxy):g} mm: {jobs_by_lxy[float(lxy)]} jobs")
+    return submit
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--max-jobs-per-category", type=int,
+        help="apply an additional per-category chunk cap to every Lxy value",
+    )
+    add_sample_arguments(parser)
+    args = parser.parse_args()
+    common = settings.COMMON
+    sample = settings.BACKGROUND if args.background else settings.SIGNAL
+    sample_type = "background" if args.background else "signal"
+
+    if common["max_events"] == 0 or common["max_events"] < -1:
+        parser.error("MAX_EVENTS must be -1 or a positive integer")
+    if args.max_jobs_per_category is not None and args.max_jobs_per_category < 1:
+        parser.error("--max-jobs-per-category must be positive")
+
+    cmssw14_src = common["cmssw14_src"]
+    cmssw15_src = common["cmssw15_src"]
+    cmssw16_src = common["cmssw16_src"]
+    validate_settings(cmssw14_src, cmssw15_src, cmssw16_src, common, sample)
+    cmssw14_src = Path(cmssw14_src).expanduser().resolve()
+    cmssw15_src = Path(cmssw15_src).expanduser().resolve()
+    cmssw16_src = Path(cmssw16_src).expanduser().resolve()
+    here = Path(__file__).resolve().parent
+    outdir = (here / Path(sample["output_directory"]).expanduser()).resolve()
+    if any(character.isspace() for character in str(outdir)):
+        raise ValueError(f"output path must not contain whitespace: {outdir}")
+    configured_input = sample["npy_directory"]
+    if not configured_input:
+        parser.error("set DEFAULT_NPY_DIRECTORY in settings.py")
+    inputs = collect_inputs([here / Path(configured_input).expanduser()], sample, sample_type)
+
+    selected = inspect_inputs(inputs, sample_type)
+    jobs, jobs_by_category_lxy = build_jobs(selected, common, sample, args.max_jobs_per_category)
+
+    if any(any(c.isspace() for c in str(path)) for path, *_ in jobs):
+        raise ValueError("input paths must not contain whitespace")
+
+    last_seed = common["base_seed"] + (len(jobs) * 5 - 1) * common["rng_seed_stride"]
+    if last_seed >= MAX_RNG_SEED:
+        raise ValueError(f"seed allocation exceeds {MAX_RNG_SEED - 1}; reduce jobs or RNG_SEED_STRIDE")
+
+    submit = write_condor_files(
+        jobs, here, outdir, common, sample_type, (cmssw14_src, cmssw15_src, cmssw16_src)
+    )
+    for (category, lxy), count in sorted(jobs_by_category_lxy.items()):
+        print(f"{category}, Lxy={lxy:g} mm: {count} files")
     print(f"Prepared {len(jobs)} jobs in {outdir}")
     print(f"Submit file: {submit}")
-    if args.dry_run:
+    if not sample["submit_jobs"]:
         print(f"[DRY-RUN] condor_submit {submit}")
     else:
         subprocess.run(["condor_submit", str(submit)], check=True)
