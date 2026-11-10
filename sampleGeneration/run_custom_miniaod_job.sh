@@ -36,7 +36,7 @@ GEN_SIM_RAW="${OUTDIR}/gen_sim_raw/${SETTING}/${ROOT_NAME}"
 AODSIM="${OUTDIR}/aod_custom/${SETTING}/${ROOT_NAME}"
 MINIAODSIM="${OUTDIR}/miniaod_custom/${SETTING}/${ROOT_NAME}"
 STAGE_LOG="${OUTDIR}/stage_logs_custom"
-CUSTOM_CFG_DIR="${WORKFLOW_DIR}/../dimuonAnalyzer/test/config"
+CUSTOM_CFG_DIR="${CFG_DIR}"
 mkdir -p "${OUTDIR}/aod_custom/${SETTING}" "${OUTDIR}/miniaod_custom/${SETTING}" "$STAGE_LOG"
 
 source /cvmfs/cms.cern.ch/cmsset_default.sh
