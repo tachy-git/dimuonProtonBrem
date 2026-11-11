@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
+trap 'status=$?; echo "[ERROR] line ${LINENO}: ${BASH_COMMAND} (exit ${status})" >&2; exit "${status}"' ERR
 
 if [[ "$#" -ne 3 ]]; then
   echo "Usage: $0 INPUT_ROOT OUTPUT_ROOT MAX_EVENTS" >&2
@@ -21,7 +22,7 @@ to_absolute() {
   if [[ "${path}" = /* ]]; then
     printf '%s\n' "${path}"
   else
-    readlink -f "${PROJECT_DIR}/${path}"
+    readlink -m "${PROJECT_DIR}/${path}"
   fi
 }
 

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
+trap 'status=$?; echo "[ERROR] line ${LINENO}: ${BASH_COMMAND} (exit ${status})" >&2; exit "${status}"' ERR
 
 if [[ "$#" -ne 3 ]]; then
   echo "Usage: $0 INPUT_ROOT OUTPUT_ROOT MAX_EVENTS" >&2
@@ -21,17 +22,7 @@ to_absolute() {
   if [[ "${path}" = /* ]]; then
     printf '%s\n' "${path}"
   else
-    readlink -f "${PROJECT_DIR}/${path}"
-  fi
-}
-
-preserve_invalid() {
-  local path="$1"
-  local reason="$2"
-  if [[ -e "${path}" ]]; then
-    local saved="${path}.invalid.$(date +%Y%m%d_%H%M%S).$$"
-    mv "${path}" "${saved}"
-    echo "[INVALID] ${reason}; preserved as ${saved}" >&2
+    readlink -m "${PROJECT_DIR}/${path}"
   fi
 }
 
@@ -44,18 +35,11 @@ import ROOT
 
 ROOT.gROOT.SetBatch(True)
 root_file = ROOT.TFile.Open(sys.argv[1])
-required = (
-    "slimmedMuon/h_bestTrack_pt",
-    "slimmedMuon/h_standAloneTrack_pt",
-    "disMuon/h_pt",
-    "disMuon/h_standAloneTrack_pt",
-    "disMuon/h_vertexFit_mass",
-    "disMuon/h_standAloneTrackFit_mass",
-)
 valid = bool(
     root_file
     and not root_file.IsZombie()
-    and all(root_file.Get(name) for name in required)
+    and not root_file.TestBit(ROOT.TFile.kRecovered)
+    and root_file.GetListOfKeys().GetSize() > 0
 )
 if root_file:
     root_file.Close()
@@ -88,31 +72,30 @@ source /cvmfs/cms.cern.ch/cmsset_default.sh
 cd "${CMSSW_SRC}"
 eval "$(scram runtime -sh)"
 
-if valid_histo_file "${OUTPUT_ABS}"; then
-  echo "[SKIP] Valid output already exists: ${OUTPUT_ABS}"
-  exit 0
+# Always recompute. Do not remove the input if paths were accidentally reused.
+if [[ "${INPUT_ABS}" -ef "${OUTPUT_ABS}" || "${INPUT_ABS}" == "${OUTPUT_ABS}" ]]; then
+  echo "[ERROR] Input and output must be different files" >&2
+  exit 3
 fi
-preserve_invalid "${OUTPUT_ABS}" "existing histogram output is invalid"
-preserve_invalid "${TMP_OUTPUT}" "stale temporary output"
-preserve_invalid "${INNER_TMP}" "stale inner temporary output"
+cleanup() {
+  rm -f -- "${TMP_OUTPUT}" "${INNER_TMP}"
+}
+trap cleanup EXIT
+trap 'exit 143' TERM
+trap 'exit 130' INT
+rm -f -- "${OUTPUT_ABS}"
+cleanup
 
 status=0
 python3 "${ANALYZER}" "${INPUT_ABS}" "${TMP_OUTPUT}" \
   --max-events "${MAX_EVENTS}" || status=$?
 if [[ "${status}" -ne 0 ]]; then
-  preserve_invalid "${TMP_OUTPUT}" "histogram analysis failed with status ${status}"
-  preserve_invalid "${INNER_TMP}" "histogram analysis failed with status ${status}"
+  echo "[ERROR] Histogram analysis failed with status ${status}" >&2
   exit "${status}"
 fi
 if ! valid_histo_file "${TMP_OUTPUT}"; then
-  preserve_invalid "${TMP_OUTPUT}" "histogram output is invalid"
+  echo "[ERROR] Histogram output is not a readable, nonempty ROOT file" >&2
   exit 5
 fi
-if valid_histo_file "${OUTPUT_ABS}"; then
-  preserve_invalid "${TMP_OUTPUT}" "another process created the final output"
-  echo "[SKIP] Another process completed: ${OUTPUT_ABS}"
-  exit 0
-fi
-preserve_invalid "${OUTPUT_ABS}" "final path appeared but is invalid"
-mv "${TMP_OUTPUT}" "${OUTPUT_ABS}"
+mv -f -- "${TMP_OUTPUT}" "${OUTPUT_ABS}"
 echo "[DONE] ${OUTPUT_ABS}"

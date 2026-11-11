@@ -1,62 +1,48 @@
 #!/usr/bin/env python3
 import argparse
+from itertools import combinations
 import math
 import os
 import sys
 
-
 TREE_PATH = "dimuonAnalyzer/tree"
 PROGRESS_EVERY = 100000
-
 MUON_PREFIX = "muon"
 BEST_VERTEX_PREFIX = "muonVertex"
 STA_VERTEX_PREFIX = "muonStaVertex"
 DISPLACED_MUON_PREFIX = "disMuon"
-DISPLACED_VERTEX_PREFIX = "disMuonVertex"
 DISPLACED_STA_VERTEX_PREFIX = "disMuonStaVertex"
-
+DISPLACED_TRACK_PREFIX = "disStaTrack"
+DISPLACED_TRACK_VERTEX_PREFIX = "disStaTrackVertex"
 KINVALID = -900.0
-MATCH_DR_MAX = 0.3
-
-MASS_BINS = 500
-MASS_MIN = 0.0
-MASS_MAX = 5.0
-
-PT_BINS = 100
-PT_MIN = 0.0
-PT_MAX = 50.0
-
-PT_ERROR_BINS = 60
-PT_ERROR_MIN = 0.0
-PT_ERROR_MAX = 3.0
-
-PT_RATIO_BINS = 400
-PT_RATIO_MIN = 0.0
-PT_RATIO_MAX = 2.0
-
-REL_PT_ERROR_BINS = 100
-REL_PT_ERROR_MIN = 0.0
-REL_PT_ERROR_MAX = 1.0
-
-PT_PULL_BINS = 500
-PT_PULL_MIN = -10.0
-PT_PULL_MAX = 10.0
-
-ABS_D0_BINS = 500
-ABS_D0_MIN = 0.0
-ABS_D0_MAX = 50.0
-
-D0_ERROR_BINS = 1000
-D0_ERROR_MIN = 0.0
-D0_ERROR_MAX = 10.0
-
-REL_D0_ERROR_BINS = 500
-REL_D0_ERROR_MIN = 0.0
-REL_D0_ERROR_MAX = 50.0
-
-ABS_ETA_BINS = 60
-ABS_ETA_MIN = 0.0
-ABS_ETA_MAX = 3.0
+MUON_MASS_GEV = 0.1056583745
+MASS_BINNING = (500, 0.0, 5.0)
+GEN_RECO_MASS_BINNING = (30, 0.2, 0.5, 500, 0.0, 5.0)
+LXY_BINNING = (300, 0.0, 300.0)
+LXY_ERROR_BINNING = (101, 0.0, 101.0)
+PT_BINNING = (100, 0.0, 50.0)
+PT_ERROR_BINNING = (60, 0.0, 3.0)
+PT_RATIO_BINNING = (400, 0.0, 2.0)
+DR_BINNING = (100, 0.0, 0.5)
+MATCHED_GEN_DR_BINNING = (30, 0.0, 0.3)
+GEN_MATCH_DR_MAX = 0.1
+GEN_MATCH_REL_PT_MAX = 0.10
+DPHI_BINNING = (128, 0.0, math.pi)
+NORM_CHI2_BINNING = (200, 0.0, 100.0)
+VERTEX_PROB_BINNING = (100, 0.0, 1.0)
+COUNT_BINNING = (101, -0.5, 100.5)
+VERTEX_PROB_CUT = 0.001
+MASS_REGIONS = ("massLt0p23", "massGt0p27")
+LXY_MM_TO_CM = 0.1
+LXY_REL_ERROR_BINNING = (200, 0.0, 10.0)
+LXY_RATIO_2D_BINNING = (300, 0.0, 300.0, 200, 0.0, 2.0)
+HISTOGRAM_DIRECTORIES = {
+    "gen": "GEN",
+    "best": "slimmedMuon",
+    "standalone": "slimmedMuon",
+    "disStandalone": "displacedSlimmedMuon",
+    "disTrack": "displacedStandaloneMuon",
+}
 
 
 def parse_cli():
@@ -65,12 +51,8 @@ def parse_cli():
     )
     parser.add_argument("input_root", help="input dimuonAnalyzer ROOT file")
     parser.add_argument("output_root", help="output histogram ROOT file")
-    parser.add_argument(
-        "--max-events",
-        type=int,
-        default=-1,
-        help="maximum entries to process; -1 means all",
-    )
+    parser.add_argument("--max-events", type=int, default=-1,
+                        help="maximum entries to process; -1 means all")
     args = parser.parse_args()
     if args.max_events == 0 or args.max_events < -1:
         parser.error("--max-events must be -1 or a positive integer")
@@ -79,15 +61,10 @@ def parse_cli():
 
 def get_root():
     import ROOT
-
     ROOT.gROOT.SetBatch(True)
     ROOT.gErrorIgnoreLevel = ROOT.kError
     ROOT.TH1.AddDirectory(False)
     return ROOT
-
-
-def ensure_dir(path):
-    os.makedirs(path, exist_ok=True)
 
 
 def vector_to_floats(values):
@@ -102,19 +79,113 @@ def is_valid_number(value):
     return math.isfinite(value) and value > KINVALID
 
 
-def valid_muon(pt, eta, phi, charge):
-    return (
-        is_valid_number(pt)
-        and pt > 0.0
-        and is_valid_number(eta)
-        and is_valid_number(phi)
-        and charge != 0
-    )
+def valid_track(pt, eta, phi, charge):
+    return (is_valid_number(pt) and pt > 0.0 and is_valid_number(eta)
+            and is_valid_number(phi) and charge != 0)
 
 
-def delta_r(ROOT, eta1, phi1, eta2, phi2):
-    delta_phi = ROOT.TVector2.Phi_mpi_pi(phi1 - phi2)
+def delta_r(eta1, phi1, eta2, phi2):
+    delta_phi = math.remainder(phi1 - phi2, 2.0 * math.pi)
     return math.hypot(eta1 - eta2, delta_phi)
+
+
+def dimuon_pt(pt1, phi1, pt2, phi2):
+    if not (is_valid_number(pt1) and pt1 > 0.0
+            and is_valid_number(pt2) and pt2 > 0.0
+            and is_valid_number(phi1) and is_valid_number(phi2)):
+        return
+    pt = math.hypot(pt1 * math.cos(phi1) + pt2 * math.cos(phi2),
+                    pt1 * math.sin(phi1) + pt2 * math.sin(phi2))
+    if math.isfinite(pt):
+        return pt
+
+
+def fill_dimuon_pt(histogram, pt1, phi1, pt2, phi2, weight):
+    pt = dimuon_pt(pt1, phi1, pt2, phi2)
+    if pt is not None:
+        histogram.Fill(pt, weight)
+
+
+def fill_dimuon_dr_vs_pt(histogram, pt1, eta1, phi1, pt2, eta2, phi2, weight):
+    pt = dimuon_pt(pt1, phi1, pt2, phi2)
+    if pt is None or not (is_valid_number(eta1) and is_valid_number(eta2)):
+        return
+    dr = delta_r(eta1, phi1, eta2, phi2)
+    if math.isfinite(dr):
+        histogram.Fill(pt, dr, weight)
+
+
+def fill_pair_pt(histogram, tracks, weight, dr_vs_pt=None):
+    for first, second in combinations(tracks, 2):
+        if first["charge"] * second["charge"] < 0:
+            fill_dimuon_pt(histogram, first["pt"], first["phi"],
+                           second["pt"], second["phi"], weight)
+            if dr_vs_pt is not None:
+                fill_dimuon_dr_vs_pt(
+                    dr_vs_pt, first["pt"], first["eta"], first["phi"],
+                    second["pt"], second["eta"], second["phi"], weight)
+
+
+def fill_pair_delta_r(histogram, tracks, weight):
+    for first, second in combinations(tracks, 2):
+        if first["charge"] * second["charge"] < 0:
+            histogram.Fill(delta_r(first["eta"], first["phi"],
+                                   second["eta"], second["phi"]), weight)
+
+
+def fill_gen_dimuon_mass(ROOT, histogram, gen_muons, weight):
+    vectors = [ROOT.Math.PtEtaPhiMVector(muon["pt"], muon["eta"],
+                                       muon["phi"], MUON_MASS_GEV)
+               for muon in gen_muons]
+    for first, second in combinations(range(len(gen_muons)), 2):
+        if gen_muons[first]["charge"] * gen_muons[second]["charge"] < 0:
+            mass = (vectors[first] + vectors[second]).M()
+            if math.isfinite(mass) and mass >= 0.0:
+                histogram.Fill(mass, weight)
+
+
+def fill_gen_vs_displaced_mass(ROOT, histogram, entry, gen_muons, weight):
+    """One fill per valid OS displaced slimmed-muon standalone vertex when the event has one gen OS pair."""
+    if len(gen_muons) != 2 or gen_muons[0]["charge"] * gen_muons[1]["charge"] >= 0:
+        return
+    vectors = [ROOT.Math.PtEtaPhiMVector(muon["pt"], muon["eta"],
+                                       muon["phi"], MUON_MASS_GEV)
+               for muon in gen_muons]
+    gen_mass = (vectors[0] + vectors[1]).M()
+    if not math.isfinite(gen_mass) or gen_mass < 0.0:
+        return
+    charges = vector_to_ints(entry.disMuon_standAloneMuon_charge)
+    for index, arrays in valid_vertices(entry, DISPLACED_STA_VERTEX_PREFIX):
+        first, second = arrays["mu1Index"][index], arrays["mu2Index"][index]
+        if not (0 <= first < len(charges) and 0 <= second < len(charges)):
+            continue
+        if charges[first] * charges[second] >= 0:
+            continue
+        reco_mass = arrays["mass"][index]
+        if math.isfinite(reco_mass) and reco_mass >= 0.0:
+            histogram.Fill(gen_mass, reco_mass, weight)
+
+
+def make_records(entry, prefix, has_flag=None):
+    pts = vector_to_floats(getattr(entry, f"{prefix}_pt"))
+    errors = vector_to_floats(getattr(entry, f"{prefix}_ptError"))
+    etas = vector_to_floats(getattr(entry, f"{prefix}_eta"))
+    phis = vector_to_floats(getattr(entry, f"{prefix}_phi"))
+    charges = vector_to_ints(getattr(entry, f"{prefix}_charge"))
+    flags = vector_to_ints(getattr(entry, has_flag)) if has_flag else None
+    size = min(len(pts), len(errors), len(etas), len(phis), len(charges))
+    if flags is not None:
+        size = min(size, len(flags))
+    records = []
+    for index in range(size):
+        if flags is not None and flags[index] != 1:
+            continue
+        if not valid_track(pts[index], etas[index], phis[index], charges[index]):
+            continue
+        records.append({"index": index, "pt": pts[index], "pt_error": errors[index],
+                        "eta": etas[index], "phi": phis[index],
+                        "charge": charges[index]})
+    return records
 
 
 def make_gen_records(entry):
@@ -122,905 +193,463 @@ def make_gen_records(entry):
     etas = vector_to_floats(entry.genMuon_eta)
     phis = vector_to_floats(entry.genMuon_phi)
     charges = vector_to_ints(entry.genMuon_charge)
-
     records = []
     for index in range(min(len(pts), len(etas), len(phis), len(charges))):
-        if not valid_muon(pts[index], etas[index], phis[index], charges[index]):
-            continue
-        records.append(
-            {
-                "index": index,
-                "pt": pts[index],
-                "eta": etas[index],
-                "phi": phis[index],
-                "charge": charges[index],
-            }
-        )
+        if valid_track(pts[index], etas[index], phis[index], charges[index]):
+            records.append({"index": index, "pt": pts[index], "eta": etas[index],
+                            "phi": phis[index], "charge": charges[index]})
     return records
 
 
-def make_best_track_records(entry):
-    pts = vector_to_floats(getattr(entry, f"{MUON_PREFIX}_pt"))
-    pt_errors = vector_to_floats(getattr(entry, f"{MUON_PREFIX}_ptError"))
-    d0s = vector_to_floats(getattr(entry, f"{MUON_PREFIX}_d0"))
-    d0_errors = vector_to_floats(getattr(entry, f"{MUON_PREFIX}_d0Error"))
-    etas = vector_to_floats(getattr(entry, f"{MUON_PREFIX}_eta"))
-    phis = vector_to_floats(getattr(entry, f"{MUON_PREFIX}_phi"))
-    charges = vector_to_ints(getattr(entry, f"{MUON_PREFIX}_charge"))
-
-    records = []
-    n_muons = min(len(pts), len(etas), len(phis), len(charges))
-    for index in range(n_muons):
-        if not valid_muon(pts[index], etas[index], phis[index], charges[index]):
-            continue
-
-        records.append(
-            {
-                "index": index,
-                "pt": pts[index],
-                "pt_error": pt_errors[index] if index < len(pt_errors) else KINVALID,
-                "d0": d0s[index] if index < len(d0s) else KINVALID,
-                "d0_error": d0_errors[index] if index < len(d0_errors) else KINVALID,
-                "eta": etas[index],
-                "phi": phis[index],
-                "charge": charges[index],
-            }
-        )
-    return records
+def make_best_track_records(entry, prefix=MUON_PREFIX):
+    return make_records(entry, prefix)
 
 
 def make_standalone_track_records(entry, prefix=MUON_PREFIX):
-    has_sta = vector_to_ints(getattr(entry, f"{prefix}_hasStandAloneMuon"))
-    pts = vector_to_floats(getattr(entry, f"{prefix}_standAloneMuon_pt"))
-    pt_errors = vector_to_floats(
-        getattr(entry, f"{prefix}_standAloneMuon_ptError")
-    )
-    d0s = vector_to_floats(getattr(entry, f"{prefix}_standAloneMuon_d0"))
-    d0_errors = vector_to_floats(
-        getattr(entry, f"{prefix}_standAloneMuon_d0Error")
-    )
-    etas = vector_to_floats(getattr(entry, f"{prefix}_standAloneMuon_eta"))
-    phis = vector_to_floats(getattr(entry, f"{prefix}_standAloneMuon_phi"))
-    charges = vector_to_ints(getattr(entry, f"{prefix}_standAloneMuon_charge"))
+    return make_records(entry, f"{prefix}_standAloneMuon",
+                        f"{prefix}_hasStandAloneMuon")
 
-    records = []
-    n_muons = min(
-        len(has_sta), len(pts), len(pt_errors), len(etas), len(phis), len(charges)
+
+def unique_gen_by_charge(gen_muons):
+    candidates = {}
+    for gen_muon in gen_muons:
+        candidates.setdefault(gen_muon["charge"], []).append(gen_muon)
+    return {charge: muons[0] for charge, muons in candidates.items()
+            if len(muons) == 1}
+
+
+def fill_matched_gen_count_vs_dr(histogram, gen_muons, tracks, weight,
+                                 require_pt_match=True, require_dr_match=True,
+                                 dr_max=GEN_MATCH_DR_MAX,
+                                 rel_pt_max=GEN_MATCH_REL_PT_MAX):
+    """Count each gen muon once, independently of duplicate reco tracks."""
+    if len(gen_muons) != 2 or gen_muons[0]["charge"] * gen_muons[1]["charge"] >= 0:
+        return
+    matched = sum(
+        any(track["charge"] == gen["charge"]
+            and (not require_dr_match
+                 or delta_r(track["eta"], track["phi"], gen["eta"], gen["phi"])
+                 < dr_max)
+            and (not require_pt_match
+                 or abs(track["pt"] - gen["pt"]) / gen["pt"] < rel_pt_max)
+            for track in tracks)
+        for gen in gen_muons)
+    first, second = gen_muons
+    histogram.Fill(delta_r(first["eta"], first["phi"],
+                           second["eta"], second["phi"]), matched, weight)
+
+
+def book(ROOT, name, title, binning):
+    return ROOT.TH1F(name, title, *binning)
+
+
+def book_track_histograms(ROOT, histograms, key, obj, title):
+    histograms[f"{key}DR"] = book(
+        ROOT, f"h_dR_{obj}",
+        f"{title} opposite-charge pair #DeltaR;#DeltaR;Weighted pairs", DR_BINNING)
+    definitions = (
+        ("Pt", "pt", f"{title} p_{{T}};p_{{T}} [GeV];Weighted tracks", PT_BINNING),
+        ("PtError", "ptError", f"{title} #sigma(p_{{T}});#sigma(p_{{T}}) [GeV];Weighted tracks", PT_ERROR_BINNING),
+        ("PtOverGenPt", "ptOverGenPt", f"{title} p_{{T}}/gen p_{{T}} (charge matched);p_{{T}}/p_{{T}}^{{gen}};Weighted tracks", PT_RATIO_BINNING),
     )
-    for index in range(n_muons):
-        if has_sta[index] != 1:
-            continue
-        if not valid_muon(pts[index], etas[index], phis[index], charges[index]):
-            continue
-        records.append(
-            {
-                "index": index,
-                "pt": pts[index],
-                "pt_error": pt_errors[index],
-                "d0": d0s[index] if index < len(d0s) else KINVALID,
-                "d0_error": d0_errors[index] if index < len(d0_errors) else KINVALID,
-                "eta": etas[index],
-                "phi": phis[index],
-                "charge": charges[index],
-            }
+    for suffix, variable, hist_title, binning in definitions:
+        histograms[f"{key}{suffix}"] = book(
+            ROOT, f"h_{variable}_{obj}", hist_title, binning)
+
+
+def book_fit_histograms(ROOT, histograms, key, obj, title):
+    histograms[f"{key}FitDR"] = book(
+        ROOT, f"h_dR_refit_{obj}",
+        f"{title} refitted dimuon #DeltaR;#DeltaR;Weighted vertices", DR_BINNING)
+    histograms[f"{key}FitMass"] = book(
+        ROOT, f"h_mass_{obj}",
+        f"{title} mass after vertex refit;m_{{#mu#mu}}^{{refit}} [GeV];Weighted vertices",
+        MASS_BINNING)
+    histograms[f"{key}FitLxy"] = book(
+        ROOT, f"h_lxy_{obj}",
+        f"{title} transverse decay length;L_{{xy}} [cm];Weighted vertices",
+        LXY_BINNING)
+    histograms[f"{key}FitLxyError"] = book(
+        ROOT, f"h_lxyError_{obj}",
+        f"{title} transverse decay-length uncertainty;#sigma(L_{{xy}}) [cm];Weighted vertices",
+        LXY_ERROR_BINNING)
+    histograms[f"{key}FitLxyRelError"] = book(
+        ROOT, f"h_lxyErrorOverLxy_{obj}",
+        f"{title} relative transverse decay-length uncertainty;#sigma(L_{{xy}})/L_{{xy}};Weighted vertices",
+        LXY_REL_ERROR_BINNING)
+    if key != "disStandalone":
+        histograms[f"{key}FitMassLxyRelErrorLt6"] = book(
+            ROOT, f"h_mass_lxyErrorOverLxyLt6_{obj}",
+            f"{title} mass for #sigma(L_{{xy}})/L_{{xy}} < 6;m_{{#mu#mu}}^{{refit}} [GeV];Weighted vertices",
+            MASS_BINNING)
+        histograms[f"{key}FitMassLxyWindow"] = book(
+            ROOT, f"h_mass_sampleLxyWindow_{obj}",
+            f"{title} mass in sample L_{{xy}} window;m_{{#mu#mu}}^{{refit}} [GeV];Weighted vertices",
+            MASS_BINNING)
+        histograms[f"{key}FitLxyVsRefitPtOverGenPt"] = ROOT.TH2F(
+            f"h_lxyVsRefitPtOverGenPt_{obj}",
+            f"{title} L_{{xy}} vs refitted/gen p_{{T}};L_{{xy}} [cm];p_{{T}}^{{refit}}/p_{{T}}^{{gen}}",
+            *LXY_RATIO_2D_BINNING)
+    refit_obj = f"refitMuon_{obj}"
+    definitions = (
+        ("RefitPt", "pt", f"{title} refitted-track p_{{T}};p_{{T}}^{{refit}} [GeV];Weighted tracks", PT_BINNING),
+        ("RefitPtError", "ptError", f"{title} refitted-track #sigma(p_{{T}});#sigma(p_{{T}}^{{refit}}) [GeV];Weighted tracks", PT_ERROR_BINNING),
+        ("RefitPtOverGenPt", "ptOverGenPt", f"{title} refitted-track p_{{T}}/gen p_{{T}} (charge matched);p_{{T}}^{{refit}}/p_{{T}}^{{gen}};Weighted tracks", PT_RATIO_BINNING),
+    )
+    for suffix, variable, hist_title, binning in definitions:
+        histograms[f"{key}{suffix}"] = book(
+            ROOT, f"h_{variable}_{refit_obj}", hist_title, binning)
+
+
+def book_mass_region_histograms(ROOT, histograms):
+    obj = "displacedMuonStandAloneTrackFit"
+    for region in MASS_REGIONS:
+        key = f"disStandalone_{region}_"
+        label = "m < 0.23 GeV" if region == "massLt0p23" else "m > 0.27 GeV"
+        definitions = (
+            ("dPhi", "Before refit;|#Delta#phi|;Weighted vertices", DPHI_BINNING),
+            ("dPhi_refit", "After refit;|#Delta#phi^{refit}|;Weighted vertices", DPHI_BINNING),
+            ("dPhi_beforeVsRefit", "Before vs after refit;|#Delta#phi|;|#Delta#phi^{refit}|", DPHI_BINNING * 2),
+            ("dPhi_genVsRefit", "Gen vs refit;|#Delta#phi^{gen}|;|#Delta#phi^{refit}|", DPHI_BINNING * 2),
+            ("dR_genVsRefit", "Gen vs refit;#DeltaR^{gen};#DeltaR^{refit}", DR_BINNING * 2),
+            ("lxy", "Decay length;L_{xy} [cm];Weighted vertices", LXY_BINNING),
+            ("lxyError", "Decay-length uncertainty;#sigma(L_{xy}) [cm];Weighted vertices", LXY_ERROR_BINNING),
+            ("normChi2", "Vertex normalized chi2;#chi^{2}/ndof;Weighted vertices", NORM_CHI2_BINNING),
+            ("vtxProb", "Vertex probability;Vertex probability;Weighted vertices", VERTEX_PROB_BINNING),
         )
-    return records
+        for variable, title, binning in definitions:
+            hist_type = ROOT.TH2F if len(binning) == 6 else ROOT.TH1F
+            histograms[key + variable] = hist_type(
+                f"h_{variable}_{obj}_{region}", f"{label}: {title}", *binning)
 
 
-def make_displaced_muon_records(entry):
-    prefix = DISPLACED_MUON_PREFIX
-    pts = vector_to_floats(getattr(entry, f"{prefix}_pt"))
-    pt_errors = vector_to_floats(getattr(entry, f"{prefix}_ptError"))
-    d0s = vector_to_floats(getattr(entry, f"{prefix}_d0"))
-    d0_errors = vector_to_floats(getattr(entry, f"{prefix}_d0Error"))
-    etas = vector_to_floats(getattr(entry, f"{prefix}_eta"))
-    phis = vector_to_floats(getattr(entry, f"{prefix}_phi"))
-    charges = vector_to_ints(getattr(entry, f"{prefix}_charge"))
-
-    records = []
-    n_muons = min(len(pts), len(etas), len(phis), len(charges))
-    for index in range(n_muons):
-        if not valid_muon(pts[index], etas[index], phis[index], charges[index]):
-            continue
-        records.append(
-            {
-                "index": index,
-                "pt": pts[index],
-                "pt_error": pt_errors[index] if index < len(pt_errors) else KINVALID,
-                "d0": d0s[index] if index < len(d0s) else KINVALID,
-                "d0_error": d0_errors[index] if index < len(d0_errors) else KINVALID,
-                "eta": etas[index],
-                "phi": phis[index],
-                "charge": charges[index],
-            }
-        )
-    return records
+def valid_vertex_probability(value):
+    return math.isfinite(value) and 0.0 <= value <= 1.0
 
 
-def match_gen_to_muons_by_dr(ROOT, gen_muons, muons):
-    candidates = []
-    for gen_pos, gen_muon in enumerate(gen_muons):
-        for muon_pos, muon in enumerate(muons):
-            if muon["charge"] != gen_muon["charge"]:
-                continue
-            dr = delta_r(ROOT, gen_muon["eta"], gen_muon["phi"], muon["eta"], muon["phi"])
-            if math.isfinite(dr) and dr < MATCH_DR_MAX:
-                candidates.append((dr, gen_pos, muon_pos))
-
-    matches = []
-    used_gen = set()
-    used_muons = set()
-    for dr, gen_pos, muon_pos in sorted(candidates):
-        if gen_pos in used_gen or muon_pos in used_muons:
-            continue
-        used_gen.add(gen_pos)
-        used_muons.add(muon_pos)
-        matches.append({"gen": gen_muons[gen_pos], "muon": muons[muon_pos], "dr": dr})
-    return matches
+def passes_vertex_probability_cut(value):
+    return valid_vertex_probability(value) and value > VERTEX_PROB_CUT
 
 
-def opposite_sign_matches(matches):
-    """Return matches whose gen muon belongs to at least one OS matched pair."""
-    selected = []
-    for index, match in enumerate(matches):
-        gen_muon = match["gen"]
-        if any(
-            other_index != index
-            and other["gen"]["index"] != gen_muon["index"]
-            and other["gen"]["charge"] * gen_muon["charge"] < 0
-            for other_index, other in enumerate(matches)
-        ):
-            selected.append(match)
-    return selected
-
-
-def common_best_and_standalone_matches(best_matches, standalone_matches):
-    """Select parent muons whose two tracks match the same gen muon in an OS pair."""
-    best_by_index = {match["muon"]["index"]: match for match in best_matches}
-    standalone_by_index = {
-        match["muon"]["index"]: match for match in standalone_matches
-    }
-    common_best = []
-    common_standalone_by_index = {}
-    for muon_index in best_by_index.keys() & standalone_by_index.keys():
-        best_match = best_by_index[muon_index]
-        standalone_match = standalone_by_index[muon_index]
-        if best_match["gen"]["index"] != standalone_match["gen"]["index"]:
-            continue
-        common_best.append(best_match)
-        common_standalone_by_index[muon_index] = standalone_match
-
-    selected_best = opposite_sign_matches(common_best)
-    selected_standalone = [
-        common_standalone_by_index[match["muon"]["index"]]
-        for match in selected_best
-    ]
-    return selected_best, selected_standalone
+def fill_mass_region_histograms(histograms, values, tracks_by_index, gen_by_charge, weight):
+    index, arrays = values
+    mass = arrays["mass"][index]
+    if not is_valid_number(mass) or mass < 0.0:
+        return
+    region = "massLt0p23" if mass < 0.23 else "massGt0p27" if mass > 0.27 else None
+    if region is None:
+        return
+    tracks = [tracks_by_index.get(arrays[field][index])
+              for field in ("mu1Index", "mu2Index")]
+    if any(track is None for track in tracks) or tracks[0]["charge"] * tracks[1]["charge"] >= 0:
+        return
+    key = f"disStandalone_{region}_"
+    probability = arrays["vtxProb"][index]
+    if valid_vertex_probability(probability):
+        # ROOT puts the upper edge in overflow; keep probability=1 in the last bin.
+        histograms[key + "vtxProb"].Fill(min(probability, math.nextafter(1.0, 0.0)), weight)
+    before = abs(math.remainder(tracks[0]["phi"] - tracks[1]["phi"], 2.0 * math.pi))
+    histograms[key + "dPhi"].Fill(before, weight)
+    for field, variable in (("lxy", "lxy"), ("lxyErr", "lxyError"), ("normChi2", "normChi2")):
+        value = arrays[field][index]
+        if is_valid_number(value) and value >= 0.0:
+            histograms[key + variable].Fill(value, weight)
+    phis = [arrays[f"refit_mu{muon}_phi"][index] for muon in (1, 2)]
+    if not all(is_valid_number(phi) for phi in phis):
+        return
+    after = abs(math.remainder(phis[0] - phis[1], 2.0 * math.pi))
+    histograms[key + "dPhi_refit"].Fill(after, weight)
+    histograms[key + "dPhi_beforeVsRefit"].Fill(before, after, weight)
+    gen = [gen_by_charge.get(track["charge"]) for track in tracks]
+    if any(muon is None for muon in gen):
+        return
+    gen_dphi = abs(math.remainder(gen[0]["phi"] - gen[1]["phi"], 2.0 * math.pi))
+    histograms[key + "dPhi_genVsRefit"].Fill(gen_dphi, after, weight)
+    etas = [arrays[f"refit_mu{muon}_eta"][index] for muon in (1, 2)]
+    if all(is_valid_number(eta) for eta in etas):
+        histograms[key + "dR_genVsRefit"].Fill(
+            delta_r(gen[0]["eta"], gen[0]["phi"], gen[1]["eta"], gen[1]["phi"]),
+            delta_r(etas[0], phis[0], etas[1], phis[1]), weight)
 
 
 def make_histograms(ROOT):
     histograms = {
-        "bestPt": ROOT.TH1F(
-            "h_bestTrack_pt",
-            "slimmedMuon best-track p_{T};p_{T}^{best} [GeV];Weighted muons",
-            PT_BINS,
-            PT_MIN,
-            PT_MAX,
-        ),
-        "bestGenPt": ROOT.TH1F(
-            "h_bestTrack_genPt",
-            "gen p_{T} matched to slimmedMuon best tracks;p_{T}^{gen} [GeV];Weighted muons",
-            PT_BINS,
-            PT_MIN,
-            PT_MAX,
-        ),
-        "standalonePt": ROOT.TH1F(
-            "h_standAloneTrack_pt",
-            "slimmedMuon standalone-track p_{T};p_{T}^{STA} [GeV];Weighted muons",
-            PT_BINS,
-            PT_MIN,
-            PT_MAX,
-        ),
-        "standaloneGenPt": ROOT.TH1F(
-            "h_standAloneTrack_genPt",
-            "gen p_{T} matched to slimmedMuon standalone tracks;p_{T}^{gen} [GeV];Weighted muons",
-            PT_BINS,
-            PT_MIN,
-            PT_MAX,
-        ),
-        "bestPtError": ROOT.TH1F(
-            "h_bestTrack_ptError",
-            "slimmedMuon best-track #sigma(p_{T});#sigma(p_{T}^{best}) [GeV];Weighted muons",
-            PT_ERROR_BINS,
-            PT_ERROR_MIN,
-            PT_ERROR_MAX,
-        ),
-        "standalonePtError": ROOT.TH1F(
-            "h_standAloneTrack_ptError",
-            "slimmedMuon standalone-track #sigma(p_{T});#sigma(p_{T}^{STA}) [GeV];Weighted muons",
-            PT_ERROR_BINS,
-            PT_ERROR_MIN,
-            PT_ERROR_MAX,
-        ),
-        "bestPtOverGenPt": ROOT.TH1F(
-            "h_bestTrack_ptOverGenPt",
-            "slimmedMuon best-track p_{T}/gen p_{T};p_{T}^{best}/p_{T}^{gen};Weighted muons",
-            PT_RATIO_BINS,
-            PT_RATIO_MIN,
-            PT_RATIO_MAX,
-        ),
-        "standalonePtOverGenPt": ROOT.TH1F(
-            "h_standAloneTrack_ptOverGenPt",
-            "slimmedMuon standalone-track p_{T}/gen p_{T};p_{T}^{STA}/p_{T}^{gen};Weighted muons",
-            PT_RATIO_BINS,
-            PT_RATIO_MIN,
-            PT_RATIO_MAX,
-        ),
-        "bestRelativePtError": ROOT.TH1F(
-            "h_bestTrack_relativePtError",
-            "slimmedMuon best-track relative p_{T} uncertainty;#sigma(p_{T}^{best})/p_{T}^{best};Weighted muons",
-            REL_PT_ERROR_BINS,
-            REL_PT_ERROR_MIN,
-            REL_PT_ERROR_MAX,
-        ),
-        "standaloneRelativePtError": ROOT.TH1F(
-            "h_standAloneTrack_relativePtError",
-            "slimmedMuon standalone-track relative p_{T} uncertainty;#sigma(p_{T}^{STA})/p_{T}^{STA};Weighted muons",
-            REL_PT_ERROR_BINS,
-            REL_PT_ERROR_MIN,
-            REL_PT_ERROR_MAX,
-        ),
-        "bestPtPull": ROOT.TH1F(
-            "h_bestTrack_ptPull",
-            "slimmedMuon best-track p_{T} pull;(p_{T}^{best}-p_{T}^{gen})/#sigma(p_{T}^{best});Weighted muons",
-            PT_PULL_BINS,
-            PT_PULL_MIN,
-            PT_PULL_MAX,
-        ),
-        "standalonePtPull": ROOT.TH1F(
-            "h_standAloneTrack_ptPull",
-            "slimmedMuon standalone-track p_{T} pull;(p_{T}^{STA}-p_{T}^{gen})/#sigma(p_{T}^{STA});Weighted muons",
-            PT_PULL_BINS,
-            PT_PULL_MIN,
-            PT_PULL_MAX,
-        ),
-        "bestAbsD0": ROOT.TH1F(
-            "h_bestTrack_absD0",
-            "slimmedMuon best-track |d0|;|d0^{best}| [cm];Weighted muons",
-            ABS_D0_BINS,
-            ABS_D0_MIN,
-            ABS_D0_MAX,
-        ),
-        "standaloneAbsD0": ROOT.TH1F(
-            "h_standAloneTrack_absD0",
-            "slimmedMuon standalone-track |d0|;|d0^{STA}| [cm];Weighted muons",
-            ABS_D0_BINS,
-            ABS_D0_MIN,
-            ABS_D0_MAX,
-        ),
-        "bestD0Error": ROOT.TH1F(
-            "h_bestTrack_d0Error",
-            "slimmedMuon best-track #sigma(d0);#sigma(d0^{best}) [cm];Weighted muons",
-            D0_ERROR_BINS,
-            D0_ERROR_MIN,
-            D0_ERROR_MAX,
-        ),
-        "standaloneD0Error": ROOT.TH1F(
-            "h_standAloneTrack_d0Error",
-            "slimmedMuon standalone-track #sigma(d0);#sigma(d0^{STA}) [cm];Weighted muons",
-            D0_ERROR_BINS,
-            D0_ERROR_MIN,
-            D0_ERROR_MAX,
-        ),
-        "bestRelativeD0Error": ROOT.TH1F(
-            "h_bestTrack_relativeD0Error",
-            "slimmedMuon best-track relative d0 uncertainty;#sigma(d0^{best})/|d0^{best}|;Weighted muons",
-            REL_D0_ERROR_BINS,
-            REL_D0_ERROR_MIN,
-            REL_D0_ERROR_MAX,
-        ),
-        "standaloneRelativeD0Error": ROOT.TH1F(
-            "h_standAloneTrack_relativeD0Error",
-            "slimmedMuon standalone-track relative d0 uncertainty;#sigma(d0^{STA})/|d0^{STA}|;Weighted muons",
-            REL_D0_ERROR_BINS,
-            REL_D0_ERROR_MIN,
-            REL_D0_ERROR_MAX,
-        ),
-        "bestVertexFitMass": ROOT.TH1F(
-            "h_bestTrackFit_mass",
-            "muonVertex fitted mass using best tracks;m_{#mu#mu}^{best fit} [GeV];Weighted vertices",
-            MASS_BINS,
-            MASS_MIN,
-            MASS_MAX,
-        ),
-        "standaloneVertexFitMass": ROOT.TH1F(
-            "h_standAloneTrackFit_mass",
-            "muonStaVertex fitted mass using standalone tracks;m_{#mu#mu}^{STA fit} [GeV];Weighted vertices",
-            MASS_BINS,
-            MASS_MIN,
-            MASS_MAX,
-        ),
-        "bestRefitGenPt": ROOT.TH1F(
-            "h_bestTrackFit_refitMuon_genPt",
-            "gen p_{T} matched to best-track vertex-refit muons;p_{T}^{gen} [GeV];Weighted muons",
-            PT_BINS,
-            PT_MIN,
-            PT_MAX,
-        ),
-        "bestRefitPt": ROOT.TH1F(
-            "h_bestTrackFit_refitMuon_pt",
-            "best-track vertex-refit muon p_{T};p_{T}^{refit} [GeV];Weighted muons",
-            PT_BINS,
-            PT_MIN,
-            PT_MAX,
-        ),
-        "bestRefitPtOverGenPt": ROOT.TH1F(
-            "h_bestTrackFit_refitMuon_ptOverGenPt",
-            "best-track vertex-refit muon p_{T}/gen p_{T};p_{T}^{refit}/p_{T}^{gen};Weighted muons",
-            PT_RATIO_BINS,
-            PT_RATIO_MIN,
-            PT_RATIO_MAX,
-        ),
-        "standaloneRefitGenPt": ROOT.TH1F(
-            "h_standAloneTrackFit_refitMuon_genPt",
-            "gen p_{T} matched to standalone-track vertex-refit muons;p_{T}^{gen} [GeV];Weighted muons",
-            PT_BINS,
-            PT_MIN,
-            PT_MAX,
-        ),
-        "standaloneRefitPt": ROOT.TH1F(
-            "h_standAloneTrackFit_refitMuon_pt",
-            "standalone-track vertex-refit muon p_{T};p_{T}^{refit} [GeV];Weighted muons",
-            PT_BINS,
-            PT_MIN,
-            PT_MAX,
-        ),
-        "standaloneRefitPtOverGenPt": ROOT.TH1F(
-            "h_standAloneTrackFit_refitMuon_ptOverGenPt",
-            "standalone-track vertex-refit muon p_{T}/gen p_{T};p_{T}^{refit}/p_{T}^{gen};Weighted muons",
-            PT_RATIO_BINS,
-            PT_RATIO_MIN,
-            PT_RATIO_MAX,
-        ),
+        "disStandaloneGenVsRecoMass": ROOT.TH2D(
+            "h_mass_genVsReco_displacedMuonStandAloneTrackFit",
+            "Gen dimuon vs displaced slimmed-muon standalone dimuon mass;"
+            "m_{#mu#mu}^{gen} [GeV];m_{#mu#mu}^{refit} [GeV];Weighted vertices",
+            *GEN_RECO_MASS_BINNING),
+        "genMass": book(ROOT, "h_mass_genDimuon",
+                        "generator-level opposite-charge dimuon invariant mass;"
+                        "m_{#mu#mu}^{gen} [GeV];Weighted pairs",
+                        MASS_BINNING),
+        "genPt": book(ROOT, "h_pt_genMuon",
+                      "generator-level muon p_{T};p_{T}^{gen} [GeV];Weighted muons",
+                      PT_BINNING),
+        "genDimuonPt": book(ROOT, "h_pt_genDimuon",
+                            "Generator-level opposite-charge dimuon p_{T};"
+                            "p_{T}^{#mu#mu} [GeV];Weighted pairs", PT_BINNING),
+        "genDimuonDRVsPt": ROOT.TH2F(
+            "h_dR_vs_pt_genDimuon",
+            "Generator-level opposite-charge dimuon #DeltaR vs p_{T};"
+            "p_{T}^{#mu#mu} [GeV];#DeltaR_{#mu#mu};Weighted pairs",
+            *PT_BINNING, *DR_BINNING),
+        "genDR": book(ROOT, "h_dR_genMuon",
+                      "generator-level dimuon #DeltaR;#DeltaR;Weighted events",
+                      DR_BINNING)
     }
-
-    for key, name, title in (
-        ("bestPullVsGenPt", "h2_bestTrack_ptPull_vs_genPt", "best-track p_{T} pull vs gen p_{T};p_{T}^{gen} [GeV];(p_{T}^{best}-p_{T}^{gen})/#sigma(p_{T}^{best})"),
-        ("standalonePullVsGenPt", "h2_standAloneTrack_ptPull_vs_genPt", "standalone-track p_{T} pull vs gen p_{T};p_{T}^{gen} [GeV];(p_{T}^{STA}-p_{T}^{gen})/#sigma(p_{T}^{STA})"),
-    ):
-        histograms[key] = ROOT.TH2F(
-            name, title, PT_BINS, PT_MIN, PT_MAX,
-            PT_PULL_BINS, PT_PULL_MIN, PT_PULL_MAX
-        )
-
-    for key, name, title in (
-        ("bestPullVsAbsEta", "h2_bestTrack_ptPull_vs_absEta", "best-track p_{T} pull vs |#eta^{gen}|;|#eta^{gen}|;(p_{T}^{best}-p_{T}^{gen})/#sigma(p_{T}^{best})"),
-        ("standalonePullVsAbsEta", "h2_standAloneTrack_ptPull_vs_absEta", "standalone-track p_{T} pull vs |#eta^{gen}|;|#eta^{gen}|;(p_{T}^{STA}-p_{T}^{gen})/#sigma(p_{T}^{STA})"),
-    ):
-        histograms[key] = ROOT.TH2F(
-            name, title, ABS_ETA_BINS, ABS_ETA_MIN, ABS_ETA_MAX,
-            PT_PULL_BINS, PT_PULL_MIN, PT_PULL_MAX
-        )
-
-    histograms["bestVsStandaloneRelativePtError"] = ROOT.TH2F(
-        "h2_bestTrack_vs_standAloneTrack_relativePtError",
-        "best-track vs standalone-track relative p_{T} uncertainty;"
-        "#sigma(p_{T}^{best})/p_{T}^{best};"
-        "#sigma(p_{T}^{STA})/p_{T}^{STA}",
-        REL_PT_ERROR_BINS,
-        REL_PT_ERROR_MIN,
-        REL_PT_ERROR_MAX,
-        REL_PT_ERROR_BINS,
-        REL_PT_ERROR_MIN,
-        REL_PT_ERROR_MAX,
+    categories = (
+        ("best", "bestTrack", "slimmed-muon best track", "bestTrackFit", "best-track fit"),
+        ("standalone", "standAloneTrack", "slimmed-muon standalone track", "standAloneTrackFit", "standalone-track fit"),
+        ("disStandalone", "displacedMuonStandAloneTrack", "displaced-muon standalone track", "displacedMuonStandAloneTrackFit", "displaced-muon standalone-track fit"),
+        ("disTrack", "displacedStandAloneTrack", "raw displaced standalone track", "displacedStandAloneTrackFit", "raw displaced standalone-track fit"),
     )
-
-    for key, name, title in (
-        (
-            "bestRelativeD0ErrorVsAbsD0",
-            "h2_bestTrack_relativeD0Error_vs_absD0",
-            "best-track relative d0 uncertainty vs |d0|;|d0^{best}| [cm];#sigma(d0^{best})/|d0^{best}|",
-        ),
-        (
-            "standaloneRelativeD0ErrorVsAbsD0",
-            "h2_standAloneTrack_relativeD0Error_vs_absD0",
-            "standalone-track relative d0 uncertainty vs |d0|;|d0^{STA}| [cm];#sigma(d0^{STA})/|d0^{STA}|",
-        ),
+    for key, track_obj, track_title, fit_obj, fit_title in categories:
+        book_track_histograms(ROOT, histograms, key, track_obj, track_title)
+        book_fit_histograms(ROOT, histograms, key, fit_obj, fit_title)
+    obj = "displacedMuonStandAloneTrackFit"
+    histograms["disStandaloneDimuonPt"] = book(
+        ROOT, "h_pt_dimuon_displacedMuonStandAloneTrack",
+        "Displaced standalone opposite-charge dimuon p_{T} before refit;"
+        "p_{T}^{#mu#mu} [GeV];Weighted pairs", PT_BINNING)
+    histograms["disStandaloneNMatchedGenMuonVsGenDimuonDRChargeOnly"] = ROOT.TH2D(
+        "h_nMatchedGenMuon_vs_genDimuonDR_chargeOnly",
+        "Displaced slimmed-muon standalone gen matching (same charge only);"
+        "#DeltaR_{#mu#mu}^{gen};Number of matched gen muons;Weighted events",
+        *MATCHED_GEN_DR_BINNING, 3, -0.5, 2.5)
+    histograms["disStandaloneNMatchedGenMuonVsGenDimuonDRPt30Percent"] = ROOT.TH2D(
+        "h_nMatchedGenMuon_vs_genDimuonDR_dR0p3_pt30Percent",
+        "Displaced slimmed-muon standalone gen matching "
+        "(same charge, #DeltaR < 0.3, relative p_{T} difference < 0.30);"
+        "#DeltaR_{#mu#mu}^{gen};Number of matched gen muons;Weighted events",
+        *MATCHED_GEN_DR_BINNING, 3, -0.5, 2.5)
+    histograms["disStandaloneGenRecoDRChargeOnly"] = book(
+        ROOT, "h_dR_genReco_displacedMuonStandAloneTrack_chargeOnly",
+        "Standalone gen-reco separation (same charge only);"
+        "#DeltaR(gen #mu, reco track);Weighted tracks", (500, 0.0, 5.0))
+    histograms["disStandalonePtRatioChargeOnly"] = book(
+        ROOT, "h_ptRatio_genReco_displacedMuonStandAloneTrack_chargeOnly",
+        "Standalone reco/gen transverse momentum (same charge only);"
+        "p_{T}^{reco}/p_{T}^{gen};Weighted tracks", (500, 0.0, 5.0))
+    histograms["disStandaloneFitDimuonPt"] = book(
+        ROOT, f"h_pt_dimuon_{obj}",
+        "Displaced standalone opposite-charge dimuon p_{T} after refit;"
+        "p_{T}^{#mu#mu,refit} [GeV];Weighted vertices", PT_BINNING)
+    histograms["disStandaloneFitDimuonDRVsPt"] = ROOT.TH2F(
+        f"h_dR_vs_pt_{obj}",
+        "Displaced standalone opposite-charge dimuon #DeltaR vs p_{T} after refit;"
+        "p_{T}^{#mu#mu,refit} [GeV];#DeltaR_{#mu#mu}^{refit};Weighted vertices",
+        *PT_BINNING, *DR_BINNING)
+    histograms["disStandaloneFitMassVtxProbGt0p001"] = book(
+        ROOT, f"h_mass_vtxProbGt0p001_{obj}",
+        "Displaced standalone mass for vertex probability > 0.001;"
+        "m_{#mu#mu}^{refit} [GeV];Weighted vertices", MASS_BINNING)
+    for key, name, label in (
+        ("NVertex", f"h_nVertex_{obj}", "Valid vertices"),
+        ("NVertexVtxProbGt0p001", f"h_nVertex_vtxProbGt0p001_{obj}",
+         "Valid vertices with probability > 0.001"),
+        ("NRecoMuon", "h_nRecoMuon_displacedMuonStandAloneTrack", "Valid standalone tracks"),
     ):
-        histograms[key] = ROOT.TH2F(
-            name,
-            title,
-            ABS_D0_BINS,
-            ABS_D0_MIN,
-            ABS_D0_MAX,
-            REL_D0_ERROR_BINS,
-            REL_D0_ERROR_MIN,
-            REL_D0_ERROR_MAX,
-        )
-
-    histograms["bestVsStandaloneRelativeD0Error"] = ROOT.TH2F(
-        "h2_bestTrack_vs_standAloneTrack_relativeD0Error",
-        "best-track vs standalone-track relative d0 uncertainty;"
-        "#sigma(d0^{best})/|d0^{best}|;"
-        "#sigma(d0^{STA})/|d0^{STA}|",
-        REL_D0_ERROR_BINS,
-        REL_D0_ERROR_MIN,
-        REL_D0_ERROR_MAX,
-        REL_D0_ERROR_BINS,
-        REL_D0_ERROR_MIN,
-        REL_D0_ERROR_MAX,
-    )
-
-    histograms.update(
-        {
-            "disPt": ROOT.TH1F(
-                "h_pt", "displaced slimmed-muon p_{T};p_{T} [GeV];Weighted muons",
-                PT_BINS, PT_MIN, PT_MAX,
-            ),
-            "disGenPt": ROOT.TH1F(
-                "h_genPt", "gen p_{T} matched to displaced slimmed muons;p_{T}^{gen} [GeV];Weighted muons",
-                PT_BINS, PT_MIN, PT_MAX,
-            ),
-            "disPtError": ROOT.TH1F(
-                "h_ptError", "displaced slimmed-muon #sigma(p_{T});#sigma(p_{T}) [GeV];Weighted muons",
-                PT_ERROR_BINS, PT_ERROR_MIN, PT_ERROR_MAX,
-            ),
-            "disPtOverGenPt": ROOT.TH1F(
-                "h_ptOverGenPt", "displaced slimmed-muon p_{T}/gen p_{T};p_{T}/p_{T}^{gen};Weighted muons",
-                PT_RATIO_BINS, PT_RATIO_MIN, PT_RATIO_MAX,
-            ),
-            "disRelativePtError": ROOT.TH1F(
-                "h_relativePtError", "displaced slimmed-muon relative p_{T} uncertainty;#sigma(p_{T})/p_{T};Weighted muons",
-                REL_PT_ERROR_BINS, REL_PT_ERROR_MIN, REL_PT_ERROR_MAX,
-            ),
-            "disPtPull": ROOT.TH1F(
-                "h_ptPull", "displaced slimmed-muon p_{T} pull;(p_{T}-p_{T}^{gen})/#sigma(p_{T});Weighted muons",
-                PT_PULL_BINS, PT_PULL_MIN, PT_PULL_MAX,
-            ),
-            "disAbsD0": ROOT.TH1F(
-                "h_absD0", "displaced slimmed-muon |d0|;|d0| [cm];Weighted muons",
-                ABS_D0_BINS, ABS_D0_MIN, ABS_D0_MAX,
-            ),
-            "disD0Error": ROOT.TH1F(
-                "h_d0Error", "displaced slimmed-muon #sigma(d0);#sigma(d0) [cm];Weighted muons",
-                D0_ERROR_BINS, D0_ERROR_MIN, D0_ERROR_MAX,
-            ),
-            "disRelativeD0Error": ROOT.TH1F(
-                "h_relativeD0Error", "displaced slimmed-muon relative d0 uncertainty;#sigma(d0)/|d0|;Weighted muons",
-                REL_D0_ERROR_BINS, REL_D0_ERROR_MIN, REL_D0_ERROR_MAX,
-            ),
-            "disVertexFitMass": ROOT.TH1F(
-                "h_vertexFit_mass", "displaced slimmed-muon fitted mass;m_{#mu#mu}^{fit} [GeV];Weighted vertices",
-                MASS_BINS, MASS_MIN, MASS_MAX,
-            ),
-            "disRefitGenPt": ROOT.TH1F(
-                "h_vertexFit_refitMuon_genPt", "gen p_{T} matched to displaced-muon vertex-refit muons;p_{T}^{gen} [GeV];Weighted muons",
-                PT_BINS, PT_MIN, PT_MAX,
-            ),
-            "disRefitPt": ROOT.TH1F(
-                "h_vertexFit_refitMuon_pt", "displaced-muon vertex-refit muon p_{T};p_{T}^{refit} [GeV];Weighted muons",
-                PT_BINS, PT_MIN, PT_MAX,
-            ),
-            "disRefitPtOverGenPt": ROOT.TH1F(
-                "h_vertexFit_refitMuon_ptOverGenPt", "displaced-muon vertex-refit p_{T}/gen p_{T};p_{T}^{refit}/p_{T}^{gen};Weighted muons",
-                PT_RATIO_BINS, PT_RATIO_MIN, PT_RATIO_MAX,
-            ),
-            "disPullVsGenPt": ROOT.TH2F(
-                "h2_ptPull_vs_genPt", "displaced slimmed-muon p_{T} pull vs gen p_{T};p_{T}^{gen} [GeV];(p_{T}-p_{T}^{gen})/#sigma(p_{T})",
-                PT_BINS, PT_MIN, PT_MAX, PT_PULL_BINS, PT_PULL_MIN, PT_PULL_MAX,
-            ),
-            "disPullVsAbsEta": ROOT.TH2F(
-                "h2_ptPull_vs_absEta", "displaced slimmed-muon p_{T} pull vs |#eta^{gen}|;|#eta^{gen}|;(p_{T}-p_{T}^{gen})/#sigma(p_{T})",
-                ABS_ETA_BINS, ABS_ETA_MIN, ABS_ETA_MAX, PT_PULL_BINS, PT_PULL_MIN, PT_PULL_MAX,
-            ),
-            "disRelativeD0ErrorVsAbsD0": ROOT.TH2F(
-                "h2_relativeD0Error_vs_absD0", "displaced slimmed-muon relative d0 uncertainty vs |d0|;|d0| [cm];#sigma(d0)/|d0|",
-                ABS_D0_BINS, ABS_D0_MIN, ABS_D0_MAX,
-                REL_D0_ERROR_BINS, REL_D0_ERROR_MIN, REL_D0_ERROR_MAX,
-            ),
-            "disStandalonePt": ROOT.TH1F(
-                "h_standAloneTrack_pt", "displaced-muon standalone-track p_{T};p_{T}^{STA} [GeV];Weighted muons",
-                PT_BINS, PT_MIN, PT_MAX,
-            ),
-            "disStandaloneGenPt": ROOT.TH1F(
-                "h_standAloneTrack_genPt", "gen p_{T} matched to displaced standalone tracks;p_{T}^{gen} [GeV];Weighted muons",
-                PT_BINS, PT_MIN, PT_MAX,
-            ),
-            "disStandalonePtError": ROOT.TH1F(
-                "h_standAloneTrack_ptError", "displaced standalone-track #sigma(p_{T});#sigma(p_{T}^{STA}) [GeV];Weighted muons",
-                PT_ERROR_BINS, PT_ERROR_MIN, PT_ERROR_MAX,
-            ),
-            "disStandalonePtOverGenPt": ROOT.TH1F(
-                "h_standAloneTrack_ptOverGenPt", "displaced standalone-track p_{T}/gen p_{T};p_{T}^{STA}/p_{T}^{gen};Weighted muons",
-                PT_RATIO_BINS, PT_RATIO_MIN, PT_RATIO_MAX,
-            ),
-            "disStandaloneRelativePtError": ROOT.TH1F(
-                "h_standAloneTrack_relativePtError", "displaced standalone-track relative p_{T} uncertainty;#sigma(p_{T}^{STA})/p_{T}^{STA};Weighted muons",
-                REL_PT_ERROR_BINS, REL_PT_ERROR_MIN, REL_PT_ERROR_MAX,
-            ),
-            "disStandalonePtPull": ROOT.TH1F(
-                "h_standAloneTrack_ptPull", "displaced standalone-track p_{T} pull;(p_{T}^{STA}-p_{T}^{gen})/#sigma(p_{T}^{STA});Weighted muons",
-                PT_PULL_BINS, PT_PULL_MIN, PT_PULL_MAX,
-            ),
-            "disStandaloneAbsD0": ROOT.TH1F(
-                "h_standAloneTrack_absD0", "displaced standalone-track |d0|;|d0^{STA}| [cm];Weighted muons",
-                ABS_D0_BINS, ABS_D0_MIN, ABS_D0_MAX,
-            ),
-            "disStandaloneD0Error": ROOT.TH1F(
-                "h_standAloneTrack_d0Error", "displaced standalone-track #sigma(d0);#sigma(d0^{STA}) [cm];Weighted muons",
-                D0_ERROR_BINS, D0_ERROR_MIN, D0_ERROR_MAX,
-            ),
-            "disStandaloneRelativeD0Error": ROOT.TH1F(
-                "h_standAloneTrack_relativeD0Error", "displaced standalone-track relative d0 uncertainty;#sigma(d0^{STA})/|d0^{STA}|;Weighted muons",
-                REL_D0_ERROR_BINS, REL_D0_ERROR_MIN, REL_D0_ERROR_MAX,
-            ),
-            "disStandaloneVertexFitMass": ROOT.TH1F(
-                "h_standAloneTrackFit_mass", "disMuonStaVertex fitted mass;m_{#mu#mu}^{STA fit} [GeV];Weighted vertices",
-                MASS_BINS, MASS_MIN, MASS_MAX,
-            ),
-            "disStandaloneRefitGenPt": ROOT.TH1F(
-                "h_standAloneTrackFit_refitMuon_genPt", "gen p_{T} matched to displaced standalone vertex-refit muons;p_{T}^{gen} [GeV];Weighted muons",
-                PT_BINS, PT_MIN, PT_MAX,
-            ),
-            "disStandaloneRefitPt": ROOT.TH1F(
-                "h_standAloneTrackFit_refitMuon_pt", "displaced standalone vertex-refit muon p_{T};p_{T}^{refit} [GeV];Weighted muons",
-                PT_BINS, PT_MIN, PT_MAX,
-            ),
-            "disStandaloneRefitPtOverGenPt": ROOT.TH1F(
-                "h_standAloneTrackFit_refitMuon_ptOverGenPt", "displaced standalone vertex-refit p_{T}/gen p_{T};p_{T}^{refit}/p_{T}^{gen};Weighted muons",
-                PT_RATIO_BINS, PT_RATIO_MIN, PT_RATIO_MAX,
-            ),
-            "disStandalonePullVsGenPt": ROOT.TH2F(
-                "h2_standAloneTrack_ptPull_vs_genPt", "displaced standalone-track p_{T} pull vs gen p_{T};p_{T}^{gen} [GeV];(p_{T}^{STA}-p_{T}^{gen})/#sigma(p_{T}^{STA})",
-                PT_BINS, PT_MIN, PT_MAX, PT_PULL_BINS, PT_PULL_MIN, PT_PULL_MAX,
-            ),
-            "disStandalonePullVsAbsEta": ROOT.TH2F(
-                "h2_standAloneTrack_ptPull_vs_absEta", "displaced standalone-track p_{T} pull vs |#eta^{gen}|;|#eta^{gen}|;(p_{T}^{STA}-p_{T}^{gen})/#sigma(p_{T}^{STA})",
-                ABS_ETA_BINS, ABS_ETA_MIN, ABS_ETA_MAX, PT_PULL_BINS, PT_PULL_MIN, PT_PULL_MAX,
-            ),
-            "disStandaloneRelativeD0ErrorVsAbsD0": ROOT.TH2F(
-                "h2_standAloneTrack_relativeD0Error_vs_absD0", "displaced standalone relative d0 uncertainty vs |d0|;|d0^{STA}| [cm];#sigma(d0^{STA})/|d0^{STA}|",
-                ABS_D0_BINS, ABS_D0_MIN, ABS_D0_MAX,
-                REL_D0_ERROR_BINS, REL_D0_ERROR_MIN, REL_D0_ERROR_MAX,
-            ),
-            "disBestVsStandaloneRelativePtError": ROOT.TH2F(
-                "h2_bestTrack_vs_standAloneTrack_relativePtError",
-                "displaced best vs standalone relative p_{T} uncertainty;#sigma(p_{T}^{best})/p_{T}^{best};#sigma(p_{T}^{STA})/p_{T}^{STA}",
-                REL_PT_ERROR_BINS, REL_PT_ERROR_MIN, REL_PT_ERROR_MAX,
-                REL_PT_ERROR_BINS, REL_PT_ERROR_MIN, REL_PT_ERROR_MAX,
-            ),
-            "disBestVsStandaloneRelativeD0Error": ROOT.TH2F(
-                "h2_bestTrack_vs_standAloneTrack_relativeD0Error",
-                "displaced best vs standalone relative d0 uncertainty;#sigma(d0^{best})/|d0^{best}|;#sigma(d0^{STA})/|d0^{STA}|",
-                REL_D0_ERROR_BINS, REL_D0_ERROR_MIN, REL_D0_ERROR_MAX,
-                REL_D0_ERROR_BINS, REL_D0_ERROR_MIN, REL_D0_ERROR_MAX,
-            ),
-        }
-    )
-
+        histograms[f"disStandalone{key}"] = book(
+            ROOT, name, f"{label} per event;Count;Weighted events", COUNT_BINNING)
+    book_mass_region_histograms(ROOT, histograms)
+    names = [hist.GetName() for hist in histograms.values()]
+    if len(names) != len(set(names)):
+        raise RuntimeError("Histogram names must be unique")
     for hist in histograms.values():
         hist.SetDirectory(0)
         hist.Sumw2()
     return histograms
 
 
+def histogram_directory(key):
+    matches = [directory for prefix, directory in HISTOGRAM_DIRECTORIES.items()
+               if key.startswith(prefix)]
+    if len(matches) != 1:
+        raise RuntimeError(f"Histogram key has no unique output directory: {key}")
+    return matches[0]
+
+
+def sample_lxy_window(input_path):
+    """Return the nominal sample Lxy window in the tree's cm units."""
+    basename = os.path.basename(input_path)
+    if "Lxy0" in basename:
+        return 0.0, 100.0 * LXY_MM_TO_CM
+    if "Lxy1800" in basename:
+        return 1700.0 * LXY_MM_TO_CM, 1900.0 * LXY_MM_TO_CM
+    return None
+
+
 def validate_tree(tree):
     if not tree or not tree.InheritsFrom("TTree"):
         raise RuntimeError(f"Could not find TTree: {TREE_PATH}")
-
-    required = [
-        "eventWeight",
-        "genMuon_pt",
-        "genMuon_eta",
-        "genMuon_phi",
-        "genMuon_charge",
-        "muon_pt",
-        "muon_ptError",
-        "muon_d0",
-        "muon_d0Error",
-        "muon_eta",
-        "muon_phi",
-        "muon_charge",
-        "muon_hasStandAloneMuon",
-        "muon_standAloneMuon_pt",
-        "muon_standAloneMuon_ptError",
-        "muon_standAloneMuon_d0",
-        "muon_standAloneMuon_d0Error",
-        "muon_standAloneMuon_eta",
-        "muon_standAloneMuon_phi",
-        "muon_standAloneMuon_charge",
-        "muonVertex_mu1Index",
-        "muonVertex_mu2Index",
-        "muonVertex_isValid",
-        "muonVertex_mass",
-        "muonVertex_refit_mu1_pt",
-        "muonVertex_refit_mu2_pt",
-        "muonStaVertex_mu1Index",
-        "muonStaVertex_mu2Index",
-        "muonStaVertex_isValid",
-        "muonStaVertex_mass",
-        "muonStaVertex_refit_mu1_pt",
-        "muonStaVertex_refit_mu2_pt",
-        "disMuon_pt",
-        "disMuon_ptError",
-        "disMuon_d0",
-        "disMuon_d0Error",
-        "disMuon_eta",
-        "disMuon_phi",
-        "disMuon_charge",
-        "disMuon_hasStandAloneMuon",
-        "disMuon_standAloneMuon_pt",
-        "disMuon_standAloneMuon_ptError",
-        "disMuon_standAloneMuon_d0",
-        "disMuon_standAloneMuon_d0Error",
-        "disMuon_standAloneMuon_eta",
-        "disMuon_standAloneMuon_phi",
-        "disMuon_standAloneMuon_charge",
-        "disMuonVertex_mu1Index",
-        "disMuonVertex_mu2Index",
-        "disMuonVertex_isValid",
-        "disMuonVertex_mass",
-        "disMuonVertex_refit_mu1_pt",
-        "disMuonVertex_refit_mu2_pt",
-        "disMuonStaVertex_mu1Index",
-        "disMuonStaVertex_mu2Index",
-        "disMuonStaVertex_isValid",
-        "disMuonStaVertex_mass",
-        "disMuonStaVertex_refit_mu1_pt",
-        "disMuonStaVertex_refit_mu2_pt",
-    ]
+    required = ["eventWeight", "genMuon_pt", "genMuon_eta", "genMuon_phi",
+                "genMuon_charge"]
+    required += [f"{MUON_PREFIX}_{field}" for field in
+                 ("pt", "ptError", "eta", "phi", "charge")]
+    for prefix in (MUON_PREFIX, DISPLACED_MUON_PREFIX):
+        required.append(f"{prefix}_hasStandAloneMuon")
+        required += [f"{prefix}_standAloneMuon_{field}" for field in
+                     ("pt", "ptError", "eta", "phi", "charge")]
+    required += [f"{DISPLACED_TRACK_PREFIX}_{field}" for field in
+                 ("pt", "ptError", "eta", "phi", "charge")]
+    for prefix in (BEST_VERTEX_PREFIX, STA_VERTEX_PREFIX,
+                   DISPLACED_STA_VERTEX_PREFIX, DISPLACED_TRACK_VERTEX_PREFIX):
+        required += [f"{prefix}_{field}" for field in
+                     ("mu1Index", "mu2Index", "isValid", "mass", "lxy", "lxyErr",
+                      "refit_mu1_pt", "refit_mu1_ptError",
+                      "refit_mu1_eta", "refit_mu1_phi",
+                      "refit_mu2_pt", "refit_mu2_ptError",
+                      "refit_mu2_eta", "refit_mu2_phi")]
+    required += [f"{DISPLACED_STA_VERTEX_PREFIX}_{field}"
+                 for field in ("normChi2", "vtxProb")]
     missing = [branch for branch in required if not tree.GetBranch(branch)]
     if missing:
-        message = "Missing required branch(es): " + ", ".join(missing)
-        if any(
-            branch in missing
-            for branch in (
-                "muon_ptError",
-                "muon_d0",
-                "muon_d0Error",
-                "muon_standAloneMuon_ptError",
-                "muon_standAloneMuon_d0",
-                "muon_standAloneMuon_d0Error",
-                "disMuon_ptError",
-                "disMuon_d0",
-                "disMuon_d0Error",
-                "disMuon_standAloneMuon_ptError",
-                "disMuon_standAloneMuon_d0",
-                "disMuon_standAloneMuon_d0Error",
-            )
-        ):
-            message += (
-                ". Regenerate the ntuples with the current dimuonAnalyzer.cc; "
-                "track-resolution quantities cannot be recovered from older files"
-            )
-        raise RuntimeError(message)
+        raise RuntimeError("Missing required branch(es): " + ", ".join(missing)
+                           + ". Regenerate the ntuples with the current dimuonAnalyzer.cc.")
 
 
-def fill_if_valid(hist, value, weight):
-    if is_valid_number(value):
-        hist.Fill(value, weight)
-
-
-def fill_track_resolution(histograms, prefix, track, gen_muon, weight):
-    """Fill the requested observables for one OS-pair-selected matched track."""
-    pt = track["pt"]
-    pt_error = track["pt_error"]
-    d0 = track["d0"]
-    d0_error = track["d0_error"]
-    gen_pt = gen_muon["pt"]
-    abs_gen_eta = abs(gen_muon["eta"])
-
+def fill_track_histograms(histograms, prefix, track, gen_by_charge, weight, counters):
+    pt, error = track["pt"], track["pt_error"]
     histograms[f"{prefix}Pt"].Fill(pt, weight)
-    histograms[f"{prefix}GenPt"].Fill(gen_pt, weight)
-    if gen_pt > 0.0:
-        histograms[f"{prefix}PtOverGenPt"].Fill(pt / gen_pt, weight)
-
-    if is_valid_number(d0):
-        abs_d0 = abs(d0)
-        histograms[f"{prefix}AbsD0"].Fill(abs_d0, weight)
-        if math.isfinite(d0_error) and d0_error > 0.0:
-            histograms[f"{prefix}D0Error"].Fill(d0_error, weight)
-            if abs_d0 > 0.0:
-                relative_d0_error = d0_error / abs_d0
-                histograms[f"{prefix}RelativeD0Error"].Fill(
-                    relative_d0_error, weight
-                )
-                histograms[f"{prefix}RelativeD0ErrorVsAbsD0"].Fill(
-                    abs_d0, relative_d0_error, weight
-                )
-
-    if pt <= 0.0 or not math.isfinite(pt_error) or pt_error <= 0.0:
-        return
-
-    pull = (pt - gen_pt) / pt_error
-    histograms[f"{prefix}PtError"].Fill(pt_error, weight)
-    histograms[f"{prefix}RelativePtError"].Fill(pt_error / pt, weight)
-    histograms[f"{prefix}PtPull"].Fill(pull, weight)
-    histograms[f"{prefix}PullVsGenPt"].Fill(gen_pt, pull, weight)
-    histograms[f"{prefix}PullVsAbsEta"].Fill(abs_gen_eta, pull, weight)
+    if math.isfinite(error) and error > 0.0:
+        histograms[f"{prefix}PtError"].Fill(error, weight)
+    gen_muon = gen_by_charge.get(track["charge"])
+    if gen_muon is None:
+        counters["unmatched_track_ratios"] += 1
+    else:
+        histograms[f"{prefix}PtOverGenPt"].Fill(pt / gen_muon["pt"], weight)
+        if prefix == "disStandalone":
+            histograms["disStandaloneGenRecoDRChargeOnly"].Fill(
+                delta_r(track["eta"], track["phi"],
+                        gen_muon["eta"], gen_muon["phi"]), weight)
+            histograms["disStandalonePtRatioChargeOnly"].Fill(
+                pt / gen_muon["pt"], weight)
+        counters["matched_track_ratios"] += 1
 
 
-def fill_matched_vertex_refit_pt(
-    entry, histograms, histogram_prefix, vertex_prefix, match_by_muon_index, weight
-):
-    """Fill per-leg refit pT for valid vertices matched to an OS gen pair."""
-    mu1_indices = vector_to_ints(getattr(entry, f"{vertex_prefix}_mu1Index"))
-    mu2_indices = vector_to_ints(getattr(entry, f"{vertex_prefix}_mu2Index"))
-    is_valids = vector_to_ints(getattr(entry, f"{vertex_prefix}_isValid"))
-    refit_mu1_pts = vector_to_floats(
-        getattr(entry, f"{vertex_prefix}_refit_mu1_pt")
+def vertex_arrays(entry, prefix):
+    fields = ("mu1Index", "mu2Index", "isValid", "mass", "lxy", "lxyErr",
+              "refit_mu1_pt", "refit_mu1_ptError", "refit_mu1_eta", "refit_mu1_phi",
+              "refit_mu2_pt", "refit_mu2_ptError", "refit_mu2_eta", "refit_mu2_phi")
+    if prefix == DISPLACED_STA_VERTEX_PREFIX:
+        fields += ("normChi2", "vtxProb")
+    arrays = {}
+    for field in fields:
+        values = getattr(entry, f"{prefix}_{field}")
+        arrays[field] = (vector_to_ints(values) if field in
+                         ("mu1Index", "mu2Index", "isValid")
+                         else vector_to_floats(values))
+    return arrays
+
+
+def valid_vertices(entry, vertex_prefix):
+    arrays = vertex_arrays(entry, vertex_prefix)
+    for index in range(min(len(values) for values in arrays.values())):
+        if arrays["isValid"][index] == 1:
+            yield index, arrays
+
+
+def fill_one_vertex(histograms, prefix, values, tracks_by_index, gen_by_charge,
+                    weight, counters, sample_lxy_window):
+    if prefix == "disStandalone":
+        fill_mass_region_histograms(histograms, values, tracks_by_index, gen_by_charge, weight)
+    index, arrays = values
+    if prefix == "disStandalone":
+        first = tracks_by_index.get(arrays["mu1Index"][index])
+        second = tracks_by_index.get(arrays["mu2Index"][index])
+        if first is not None and second is not None and first["charge"] * second["charge"] < 0:
+            fill_dimuon_pt(
+                histograms["disStandaloneFitDimuonPt"],
+                arrays["refit_mu1_pt"][index], arrays["refit_mu1_phi"][index],
+                arrays["refit_mu2_pt"][index], arrays["refit_mu2_phi"][index], weight)
+            fill_dimuon_dr_vs_pt(
+                histograms["disStandaloneFitDimuonDRVsPt"],
+                arrays["refit_mu1_pt"][index], arrays["refit_mu1_eta"][index],
+                arrays["refit_mu1_phi"][index], arrays["refit_mu2_pt"][index],
+                arrays["refit_mu2_eta"][index], arrays["refit_mu2_phi"][index], weight)
+    coordinates = [arrays[field][index] for field in
+                   ("refit_mu1_eta", "refit_mu1_phi", "refit_mu2_eta", "refit_mu2_phi")]
+    if all(is_valid_number(value) for value in coordinates):
+        histograms[f"{prefix}FitDR"].Fill(delta_r(*coordinates), weight)
+    mass = arrays["mass"][index]
+    if is_valid_number(mass):
+        histograms[f"{prefix}FitMass"].Fill(mass, weight)
+        if prefix == "disStandalone" and passes_vertex_probability_cut(arrays["vtxProb"][index]):
+            histograms["disStandaloneFitMassVtxProbGt0p001"].Fill(mass, weight)
+    lxy = arrays["lxy"][index]
+    valid_lxy = is_valid_number(lxy) and lxy > 0.0
+    if is_valid_number(lxy):
+        histograms[f"{prefix}FitLxy"].Fill(lxy, weight)
+    lxy_error = arrays["lxyErr"][index]
+    if is_valid_number(lxy_error):
+        histograms[f"{prefix}FitLxyError"].Fill(lxy_error, weight)
+    relative_lxy_error = None
+    if valid_lxy and is_valid_number(lxy_error) and lxy_error >= 0.0:
+        relative_lxy_error = lxy_error / lxy
+        histograms[f"{prefix}FitLxyRelError"].Fill(relative_lxy_error, weight)
+        if prefix != "disStandalone" and is_valid_number(mass) and relative_lxy_error < 6.0:
+            histograms[f"{prefix}FitMassLxyRelErrorLt6"].Fill(mass, weight)
+    if (prefix != "disStandalone" and sample_lxy_window is not None and is_valid_number(lxy) and
+            sample_lxy_window[0] <= lxy <= sample_lxy_window[1] and
+            is_valid_number(mass)):
+        histograms[f"{prefix}FitMassLxyWindow"].Fill(mass, weight)
+    refit_count = 0
+    for muon_index_field, pt_field, error_field in (
+        ("mu1Index", "refit_mu1_pt", "refit_mu1_ptError"),
+        ("mu2Index", "refit_mu2_pt", "refit_mu2_ptError"),
+    ):
+        pt, error = arrays[pt_field][index], arrays[error_field][index]
+        if not is_valid_number(pt) or pt <= 0.0:
+            continue
+        histograms[f"{prefix}RefitPt"].Fill(pt, weight)
+        if math.isfinite(error) and error > 0.0:
+            histograms[f"{prefix}RefitPtError"].Fill(error, weight)
+        track = tracks_by_index.get(arrays[muon_index_field][index])
+        gen_muon = gen_by_charge.get(track["charge"]) if track else None
+        if gen_muon is None:
+            counters["unmatched_refit_ratios"] += 1
+        else:
+            histograms[f"{prefix}RefitPtOverGenPt"].Fill(
+                pt / gen_muon["pt"], weight)
+            if prefix != "disStandalone" and valid_lxy:
+                histograms[f"{prefix}FitLxyVsRefitPtOverGenPt"].Fill(
+                    lxy, pt / gen_muon["pt"], weight)
+            counters["matched_refit_ratios"] += 1
+        refit_count += 1
+    return refit_count
+
+
+def fill_vertices(entry, histograms, prefix, vertex_prefix, tracks_by_index,
+                  gen_by_charge, weight, counters, sample_lxy_window):
+    vertices = list(valid_vertices(entry, vertex_prefix))
+    if prefix == "disStandalone":
+        histograms["disStandaloneNVertex"].Fill(len(vertices), weight)
+        passed = sum(passes_vertex_probability_cut(arrays["vtxProb"][index])
+                     for index, arrays in vertices)
+        histograms["disStandaloneNVertexVtxProbGt0p001"].Fill(passed, weight)
+    refit_count = sum(
+        fill_one_vertex(histograms, prefix, vertex, tracks_by_index,
+                        gen_by_charge, weight, counters, sample_lxy_window)
+        for vertex in vertices
     )
-    refit_mu2_pts = vector_to_floats(
-        getattr(entry, f"{vertex_prefix}_refit_mu2_pt")
-    )
-    n_vertices = min(
-        len(mu1_indices),
-        len(mu2_indices),
-        len(is_valids),
-        len(refit_mu1_pts),
-        len(refit_mu2_pts),
-    )
-
-    refit_muon_count = 0
-    for index in range(n_vertices):
-        if is_valids[index] != 1:
-            continue
-        match1 = match_by_muon_index.get(mu1_indices[index])
-        match2 = match_by_muon_index.get(mu2_indices[index])
-        if match1 is None or match2 is None:
-            continue
-        gen1 = match1["gen"]
-        gen2 = match2["gen"]
-        if gen1["index"] == gen2["index"] or gen1["charge"] * gen2["charge"] >= 0:
-            continue
-
-        for refit_pt, gen_muon in (
-            (refit_mu1_pts[index], gen1),
-            (refit_mu2_pts[index], gen2),
-        ):
-            gen_pt = gen_muon["pt"]
-            if not is_valid_number(refit_pt) or refit_pt <= 0.0 or gen_pt <= 0.0:
-                continue
-            histograms[f"{histogram_prefix}RefitGenPt"].Fill(gen_pt, weight)
-            histograms[f"{histogram_prefix}RefitPt"].Fill(refit_pt, weight)
-            histograms[f"{histogram_prefix}RefitPtOverGenPt"].Fill(
-                refit_pt / gen_pt, weight
-            )
-            refit_muon_count += 1
-
-    return refit_muon_count
+    return len(vertices), refit_count
 
 
-def fill_matched_vertices(entry, hist, vertex_prefix, match_by_muon_index, weight):
-    """Fill valid vertices whose two tracks match an opposite-sign gen pair."""
-    mu1_indices = vector_to_ints(getattr(entry, f"{vertex_prefix}_mu1Index"))
-    mu2_indices = vector_to_ints(getattr(entry, f"{vertex_prefix}_mu2Index"))
-    is_valids = vector_to_ints(getattr(entry, f"{vertex_prefix}_isValid"))
-    fit_masses = vector_to_floats(getattr(entry, f"{vertex_prefix}_mass"))
-    n_vertices = min(len(mu1_indices), len(mu2_indices), len(is_valids), len(fit_masses))
-
-    matched_vertex_count = 0
-    for index in range(n_vertices):
-        if is_valids[index] != 1:
-            continue
-        match1 = match_by_muon_index.get(mu1_indices[index])
-        match2 = match_by_muon_index.get(mu2_indices[index])
-        if match1 is None or match2 is None:
-            continue
-        gen1 = match1["gen"]
-        gen2 = match2["gen"]
-        if gen1["index"] == gen2["index"] or gen1["charge"] * gen2["charge"] >= 0:
-            continue
-
-        matched_vertex_count += 1
-        fill_if_valid(hist, fit_masses[index], weight)
-
-    return matched_vertex_count
-
-
-def valid_matched_vertex_masses(entry, vertex_prefix, match_by_muon_index):
-    """Return valid fitted masses keyed by the canonical matched muon-index pair."""
-    mu1_indices = vector_to_ints(getattr(entry, f"{vertex_prefix}_mu1Index"))
-    mu2_indices = vector_to_ints(getattr(entry, f"{vertex_prefix}_mu2Index"))
-    is_valids = vector_to_ints(getattr(entry, f"{vertex_prefix}_isValid"))
-    fit_masses = vector_to_floats(getattr(entry, f"{vertex_prefix}_mass"))
-    n_vertices = min(len(mu1_indices), len(mu2_indices), len(is_valids), len(fit_masses))
-
-    masses = {}
-    for index in range(n_vertices):
-        if is_valids[index] != 1 or not is_valid_number(fit_masses[index]):
-            continue
-        mu1_index = mu1_indices[index]
-        mu2_index = mu2_indices[index]
-        match1 = match_by_muon_index.get(mu1_index)
-        match2 = match_by_muon_index.get(mu2_index)
-        if match1 is None or match2 is None:
-            continue
-        gen1 = match1["gen"]
-        gen2 = match2["gen"]
-        if gen1["index"] == gen2["index"] or gen1["charge"] * gen2["charge"] >= 0:
-            continue
-        key = (min(mu1_index, mu2_index), max(mu1_index, mu2_index))
-        masses[key] = fit_masses[index]
-    return masses
-
-
-def fill_common_vertex_masses(
-    entry,
-    best_hist,
-    standalone_hist,
-    best_vertex_prefix,
-    standalone_vertex_prefix,
-    common_match_by_index,
-    weight,
-):
-    best_masses = valid_matched_vertex_masses(
-        entry, best_vertex_prefix, common_match_by_index
-    )
-    standalone_masses = valid_matched_vertex_masses(
-        entry, standalone_vertex_prefix, common_match_by_index
-    )
-    common_keys = best_masses.keys() & standalone_masses.keys()
-    for key in common_keys:
-        best_hist.Fill(best_masses[key], weight)
-        standalone_hist.Fill(standalone_masses[key], weight)
-    return len(common_keys)
-
-
-def fill_best_vs_standalone_relative_pt_error(
-    hist, best_match_by_index, standalone_match_by_index, weight
-):
-    """Compare uncertainties when both tracks at one muon index match the same gen muon."""
-    for muon_index in best_match_by_index.keys() & standalone_match_by_index.keys():
-        best_match = best_match_by_index[muon_index]
-        standalone_match = standalone_match_by_index[muon_index]
-        if best_match["gen"]["index"] != standalone_match["gen"]["index"]:
-            continue
-        best = best_match["muon"]
-        standalone = standalone_match["muon"]
-        if (
-            best["pt"] <= 0.0
-            or standalone["pt"] <= 0.0
-            or not math.isfinite(best["pt_error"])
-            or not math.isfinite(standalone["pt_error"])
-            or best["pt_error"] <= 0.0
-            or standalone["pt_error"] <= 0.0
-        ):
-            continue
-        hist.Fill(
-            best["pt_error"] / best["pt"],
-            standalone["pt_error"] / standalone["pt"],
-            weight,
-        )
-
-
-def fill_best_vs_standalone_relative_d0_error(
-    hist, best_match_by_index, standalone_match_by_index, weight
-):
-    """Compare relative d0 errors for two tracks matched to the same gen muon."""
-    for muon_index in best_match_by_index.keys() & standalone_match_by_index.keys():
-        best_match = best_match_by_index[muon_index]
-        standalone_match = standalone_match_by_index[muon_index]
-        if best_match["gen"]["index"] != standalone_match["gen"]["index"]:
-            continue
-        best = best_match["muon"]
-        standalone = standalone_match["muon"]
-        if (
-            not is_valid_number(best["d0"])
-            or not is_valid_number(standalone["d0"])
-            or abs(best["d0"]) <= 0.0
-            or abs(standalone["d0"]) <= 0.0
-            or not math.isfinite(best["d0_error"])
-            or not math.isfinite(standalone["d0_error"])
-            or best["d0_error"] <= 0.0
-            or standalone["d0_error"] <= 0.0
-        ):
-            continue
-        hist.Fill(
-            best["d0_error"] / abs(best["d0"]),
-            standalone["d0_error"] / abs(standalone["d0"]),
-            weight,
-        )
+def fill_category(entry, histograms, prefix, tracks, vertex_prefix,
+                  gen_by_charge, weight, counters, sample_lxy_window):
+    if prefix == "disStandalone":
+        histograms["disStandaloneNRecoMuon"].Fill(len(tracks), weight)
+        fill_pair_pt(histograms["disStandaloneDimuonPt"], tracks, weight)
+    fill_pair_delta_r(histograms[f"{prefix}DR"], tracks, weight)
+    for track in tracks:
+        fill_track_histograms(histograms, prefix, track, gen_by_charge,
+                              weight, counters)
+    vertex_count, refit_count = fill_vertices(
+        entry, histograms, prefix, vertex_prefix,
+        {track["index"]: track for track in tracks}, gen_by_charge,
+        weight, counters, sample_lxy_window)
+    return len(tracks), vertex_count, refit_count
 
 
 def process_file(input_path, output_path, max_events):
@@ -1028,203 +657,96 @@ def process_file(input_path, output_path, max_events):
     root_file = ROOT.TFile.Open(input_path)
     if not root_file or root_file.IsZombie():
         raise RuntimeError(f"Could not open input ROOT file: {input_path}")
-
     try:
         tree = root_file.Get(TREE_PATH)
         validate_tree(tree)
         histograms = make_histograms(ROOT)
-        event_count = 0
-        matched_muon_count = 0
-        matched_refit_muon_count = 0
-        matched_vertex_count = 0
-        max_events = None if max_events < 0 else max_events
-        total_entries = tree.GetEntries()
-        event_limit = total_entries if max_events is None else min(total_entries, max_events)
-        print(
-            f"[START] pid={os.getpid()} file={os.path.basename(input_path)} "
-            f"events={event_limit}/{total_entries}",
-            flush=True,
-        )
-
+        lxy_window = sample_lxy_window(input_path)
+        events = tracks_count = refits_count = vertices_count = 0
+        counters = {
+            "ambiguous_gen_events": 0,
+            "matched_track_ratios": 0,
+            "unmatched_track_ratios": 0,
+            "matched_refit_ratios": 0,
+            "unmatched_refit_ratios": 0,
+        }
+        event_limit = tree.GetEntries() if max_events < 0 else min(tree.GetEntries(), max_events)
+        print(f"[START] pid={os.getpid()} file={os.path.basename(input_path)} "
+              f"events={event_limit}/{tree.GetEntries()}", flush=True)
         for entry in tree:
-            if max_events is not None and event_count >= max_events:
+            if events >= event_limit:
                 break
-            event_count += 1
+            events += 1
             weight = float(entry.eventWeight)
+            gen = make_gen_records(entry)
+            fill_gen_dimuon_mass(ROOT, histograms["genMass"], gen, weight)
+            fill_pair_pt(histograms["genDimuonPt"], gen, weight,
+                         dr_vs_pt=histograms["genDimuonDRVsPt"])
+            fill_gen_vs_displaced_mass(
+                ROOT, histograms["disStandaloneGenVsRecoMass"], entry, gen, weight)
+            if len(gen) == 2:
+                histograms["genDR"].Fill(
+                    delta_r(gen[0]["eta"], gen[0]["phi"],
+                            gen[1]["eta"], gen[1]["phi"]), weight)
+            for gen_muon in gen:
+                histograms["genPt"].Fill(gen_muon["pt"], weight)
+            gen_by_charge = unique_gen_by_charge(gen)
+            if len(gen_by_charge) != len({muon["charge"] for muon in gen}):
+                counters["ambiguous_gen_events"] += 1
 
-            gen_muons = make_gen_records(entry)
-            best_tracks = make_best_track_records(entry)
-            standalone_tracks = make_standalone_track_records(entry)
+            categories = (
+                ("best", make_best_track_records(entry), BEST_VERTEX_PREFIX),
+                ("standalone", make_standalone_track_records(entry),
+                 STA_VERTEX_PREFIX),
+                ("disStandalone",
+                 make_standalone_track_records(entry, DISPLACED_MUON_PREFIX),
+                 DISPLACED_STA_VERTEX_PREFIX),
+                ("disTrack", make_records(entry, DISPLACED_TRACK_PREFIX),
+                 DISPLACED_TRACK_VERTEX_PREFIX),
+            )
+            for prefix, tracks, vertex_prefix in categories:
+                if prefix == "disStandalone":
+                    fill_matched_gen_count_vs_dr(
+                        histograms["disStandaloneNMatchedGenMuonVsGenDimuonDRChargeOnly"],
+                        gen, tracks, weight,
+                        require_pt_match=False, require_dr_match=False)
+                    fill_matched_gen_count_vs_dr(
+                        histograms["disStandaloneNMatchedGenMuonVsGenDimuonDRPt30Percent"],
+                        gen, tracks, weight, dr_max=0.3, rel_pt_max=0.30)
+                counts = fill_category(
+                    entry, histograms, prefix, tracks, vertex_prefix,
+                    gen_by_charge, weight, counters, lxy_window)
+                tracks_count += counts[0]
+                vertices_count += counts[1]
+                refits_count += counts[2]
+            if PROGRESS_EVERY > 0 and events % PROGRESS_EVERY == 0:
+                print(f"[PROGRESS] events={events}/{event_limit}", flush=True)
 
-            best_matches = match_gen_to_muons_by_dr(ROOT, gen_muons, best_tracks)
-            standalone_matches = match_gen_to_muons_by_dr(
-                ROOT, gen_muons, standalone_tracks
-            )
-            selected_best_matches, selected_standalone_matches = (
-                common_best_and_standalone_matches(best_matches, standalone_matches)
-            )
-
-            for match in selected_best_matches:
-                fill_track_resolution(
-                    histograms, "best", match["muon"], match["gen"], weight
-                )
-            for match in selected_standalone_matches:
-                fill_track_resolution(
-                    histograms, "standalone", match["muon"], match["gen"], weight
-                )
-
-            best_match_by_index = {
-                match["muon"]["index"]: match for match in selected_best_matches
-            }
-            standalone_match_by_index = {
-                match["muon"]["index"]: match
-                for match in selected_standalone_matches
-            }
-            fill_best_vs_standalone_relative_pt_error(
-                histograms["bestVsStandaloneRelativePtError"],
-                best_match_by_index,
-                standalone_match_by_index,
-                weight,
-            )
-            fill_best_vs_standalone_relative_d0_error(
-                histograms["bestVsStandaloneRelativeD0Error"],
-                best_match_by_index,
-                standalone_match_by_index,
-                weight,
-            )
-
-            matched_refit_muon_count += fill_matched_vertex_refit_pt(
-                entry,
-                histograms,
-                "best",
-                BEST_VERTEX_PREFIX,
-                best_match_by_index,
-                weight,
-            )
-            matched_refit_muon_count += fill_matched_vertex_refit_pt(
-                entry,
-                histograms,
-                "standalone",
-                STA_VERTEX_PREFIX,
-                standalone_match_by_index,
-                weight,
-            )
-
-            matched_vertex_count += fill_common_vertex_masses(
-                entry,
-                histograms["bestVertexFitMass"],
-                histograms["standaloneVertexFitMass"],
-                BEST_VERTEX_PREFIX,
-                STA_VERTEX_PREFIX,
-                best_match_by_index,
-                weight,
-            )
-
-            displaced_muons = make_displaced_muon_records(entry)
-            displaced_standalone_tracks = make_standalone_track_records(
-                entry, DISPLACED_MUON_PREFIX
-            )
-            displaced_best_matches = match_gen_to_muons_by_dr(
-                ROOT, gen_muons, displaced_muons
-            )
-            displaced_standalone_matches = match_gen_to_muons_by_dr(
-                ROOT, gen_muons, displaced_standalone_tracks
-            )
-            selected_displaced_best, selected_displaced_standalone = (
-                common_best_and_standalone_matches(
-                    displaced_best_matches, displaced_standalone_matches
-                )
-            )
-            for match in selected_displaced_best:
-                fill_track_resolution(
-                    histograms, "dis", match["muon"], match["gen"], weight
-                )
-            for match in selected_displaced_standalone:
-                fill_track_resolution(
-                    histograms,
-                    "disStandalone",
-                    match["muon"],
-                    match["gen"],
-                    weight,
-                )
-            displaced_best_by_index = {
-                match["muon"]["index"]: match for match in selected_displaced_best
-            }
-            displaced_standalone_by_index = {
-                match["muon"]["index"]: match
-                for match in selected_displaced_standalone
-            }
-            fill_best_vs_standalone_relative_pt_error(
-                histograms["disBestVsStandaloneRelativePtError"],
-                displaced_best_by_index,
-                displaced_standalone_by_index,
-                weight,
-            )
-            fill_best_vs_standalone_relative_d0_error(
-                histograms["disBestVsStandaloneRelativeD0Error"],
-                displaced_best_by_index,
-                displaced_standalone_by_index,
-                weight,
-            )
-            matched_refit_muon_count += fill_matched_vertex_refit_pt(
-                entry,
-                histograms,
-                "dis",
-                DISPLACED_VERTEX_PREFIX,
-                displaced_best_by_index,
-                weight,
-            )
-            matched_refit_muon_count += fill_matched_vertex_refit_pt(
-                entry,
-                histograms,
-                "disStandalone",
-                DISPLACED_STA_VERTEX_PREFIX,
-                displaced_standalone_by_index,
-                weight,
-            )
-            matched_vertex_count += fill_common_vertex_masses(
-                entry,
-                histograms["disVertexFitMass"],
-                histograms["disStandaloneVertexFitMass"],
-                DISPLACED_VERTEX_PREFIX,
-                DISPLACED_STA_VERTEX_PREFIX,
-                displaced_best_by_index,
-                weight,
-            )
-            matched_muon_count += len(selected_best_matches) + len(
-                selected_standalone_matches
-            ) + len(selected_displaced_best) + len(selected_displaced_standalone)
-
-            if PROGRESS_EVERY > 0 and event_count % PROGRESS_EVERY == 0:
-                print(
-                    f"[PROGRESS] pid={os.getpid()} file={os.path.basename(input_path)} "
-                    f"events={event_count}/{event_limit}",
-                    flush=True,
-                )
-
-        ensure_dir(os.path.dirname(output_path))
+        output_dir = os.path.dirname(output_path)
+        if output_dir:
+            os.makedirs(output_dir, exist_ok=True)
         tmp_output = f"{output_path}.tmp.root"
         output_file = ROOT.TFile.Open(tmp_output, "RECREATE")
         if not output_file or output_file.IsZombie():
             raise RuntimeError(f"Could not create output ROOT file: {tmp_output}")
         try:
-            slimmed_directory = output_file.mkdir("slimmedMuon")
-            displaced_directory = output_file.mkdir("disMuon")
+            output_dirs = {
+                name: output_file.mkdir(name)
+                for name in dict.fromkeys(HISTOGRAM_DIRECTORIES.values())
+            }
             for key, hist in histograms.items():
-                directory = displaced_directory if key.startswith("dis") else slimmed_directory
-                directory.cd()
+                output_dirs[histogram_directory(key)].cd()
                 hist.Write()
         finally:
             output_file.Close()
         os.replace(tmp_output, output_path)
-
-        print(
-            f"[DONE] Wrote {output_path} "
-            f"({event_count} events, matched muons={matched_muon_count}, "
-            f"matched refit muons={matched_refit_muon_count}, "
-            f"matched vertices={matched_vertex_count})",
-            flush=True,
-        )
+        print(f"[DONE] Wrote {output_path} ({events} events, tracks={tracks_count}, "
+              f"valid refit tracks={refits_count}, valid vertices={vertices_count}, "
+              f"track ratios matched/unmatched="
+              f"{counters['matched_track_ratios']}/{counters['unmatched_track_ratios']}, "
+              f"refit ratios matched/unmatched="
+              f"{counters['matched_refit_ratios']}/{counters['unmatched_refit_ratios']}, "
+              f"ambiguous-gen events={counters['ambiguous_gen_events']})", flush=True)
         return output_path
     finally:
         root_file.Close()
@@ -1240,20 +762,12 @@ def main():
     if input_path == output_path:
         print("[ERROR] Input and output paths must differ", file=sys.stderr)
         return 1
-
     print(f"[INFO] Input       : {input_path}")
     print(f"[INFO] Output      : {output_path}")
     print(f"[INFO] Tree        : {TREE_PATH}")
-    print(
-        f"[INFO] Gen match   : common best/standalone parent muons, "
-        f"same charge, smallest dR, dR < {MATCH_DR_MAX}"
-    )
-    print("[INFO] Pair select : opposite-sign matched gen-muon pairs")
-    if args.max_events < 0:
-        print("[INFO] Events      : all events")
-    else:
-        print(f"[INFO] Events      : max {args.max_events}")
-
+    print("[INFO] Gen match   : unique generator-level muon with the same charge")
+    print("[INFO] Reco select : all valid tracks and all valid OS vertex fits")
+    print(f"[INFO] Events      : {'all' if args.max_events < 0 else args.max_events}")
     process_file(input_path, output_path, args.max_events)
     return 0
 

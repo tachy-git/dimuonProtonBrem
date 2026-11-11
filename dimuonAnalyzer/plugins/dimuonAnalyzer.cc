@@ -51,6 +51,7 @@ void ignoreMissingProduct(Func&& func) {
 struct MuonBranches {
   int nMuon = 0;
   std::vector<float> pt;
+  std::vector<float> vz;
   std::vector<float> ptError;
   std::vector<float> eta;
   std::vector<float> phi;
@@ -80,6 +81,7 @@ struct MuonBranches {
   void clear() {
     nMuon = 0;
     pt.clear();
+    vz.clear();
     ptError.clear();
     eta.clear();
     phi.clear();
@@ -105,6 +107,24 @@ struct MuonBranches {
     standAloneMuonD0.clear();
     standAloneMuonD0Error.clear();
     standAloneMuonDz.clear();
+  }
+};
+
+struct TrackBranches {
+  int nTrack = 0;
+  std::vector<float> pt;
+  std::vector<float> ptError;
+  std::vector<float> eta;
+  std::vector<float> phi;
+  std::vector<int> charge;
+
+  void clear() {
+    nTrack = 0;
+    pt.clear();
+    ptError.clear();
+    eta.clear();
+    phi.clear();
+    charge.clear();
   }
 };
 
@@ -163,6 +183,18 @@ struct DimuonVertexBranches {
     refitMu2D0Error.clear();
   }
 };
+
+void bookTrackBranches(TTree* tree,
+                       const std::string& prefix,
+                       const std::string& countName,
+                       TrackBranches& branches) {
+  tree->Branch(countName.c_str(), &branches.nTrack, (countName + "/I").c_str());
+  tree->Branch((prefix + "_pt").c_str(), &branches.pt);
+  tree->Branch((prefix + "_ptError").c_str(), &branches.ptError);
+  tree->Branch((prefix + "_eta").c_str(), &branches.eta);
+  tree->Branch((prefix + "_phi").c_str(), &branches.phi);
+  tree->Branch((prefix + "_charge").c_str(), &branches.charge);
+}
 
 
 void bookMuonBranches(TTree* tree,
@@ -255,6 +287,7 @@ void fillGenMuonBranches(const edm::Handle<reco::GenParticleCollection>& genPart
     if (genParticle.status() != 1) continue;
     if (!genParticle.isLastCopy()) continue;
 
+    branches.vz.push_back(genParticle.vz());
     branches.pt.push_back(genParticle.pt());
     branches.ptError.push_back(kInvalid);
     branches.eta.push_back(genParticle.eta());
@@ -269,6 +302,20 @@ void fillGenMuonBranches(const edm::Handle<reco::GenParticleCollection>& genPart
   }
 
   branches.nMuon = static_cast<int>(branches.pt.size());
+}
+
+void fillTrackBranches(const edm::Handle<std::vector<reco::Track>>& tracks,
+                       TrackBranches& branches) {
+  if (!tracks.isValid()) return;
+
+  for (const auto& track : *tracks) {
+    branches.pt.push_back(track.pt());
+    branches.ptError.push_back(track.ptError());
+    branches.eta.push_back(track.eta());
+    branches.phi.push_back(track.phi());
+    branches.charge.push_back(track.charge());
+  }
+  branches.nTrack = static_cast<int>(branches.pt.size());
 }
 
 void fillMuonBranches(const std::vector<const pat::Muon*>& muons,
@@ -663,6 +710,7 @@ private:
   MuonBranches genMuonBranches_;
   MuonBranches muonBranches_;
   MuonBranches disMuonBranches_;
+  TrackBranches disStaTrackBranches_;
   DimuonVertexBranches muonVertexBranches_;
   DimuonVertexBranches muonStaVertexBranches_;
   DimuonVertexBranches disMuonVertexBranches_;
@@ -704,8 +752,10 @@ void dimuonAnalyzer::beginJob() {
   tree_->Branch("genMother_phi", &genMotherPhi_, "genMother_phi/F");
   tree_->Branch("genMother_mass", &genMotherMass_, "genMother_mass/F");
   bookMuonBranches(tree_, "genMuon", "nGenMuon", genMuonBranches_, false, false, false, false);
+  tree_->Branch("genMuon_vz", &genMuonBranches_.vz);
   bookMuonBranches(tree_, "muon", "nMuon", muonBranches_, true, true, true, true, true);
   bookMuonBranches(tree_, "disMuon", "nDisMuon", disMuonBranches_, false, true, true, true, true);
+  bookTrackBranches(tree_, "disStaTrack", "nDisStaTrack", disStaTrackBranches_);
   bookDimuonVertexBranches(tree_, "muonVertex", "nMuonVertex", muonVertexBranches_);
   bookDimuonVertexBranches(tree_, "muonStaVertex", "nMuonStaVertex", muonStaVertexBranches_);
   bookDimuonVertexBranches(tree_, "disMuonVertex", "nDisMuonVertex", disMuonVertexBranches_);
@@ -722,6 +772,7 @@ void dimuonAnalyzer::clearBranches() {
   genMuonBranches_.clear();
   muonBranches_.clear();
   disMuonBranches_.clear();
+  disStaTrackBranches_.clear();
   muonVertexBranches_.clear();
   muonStaVertexBranches_.clear();
   disMuonVertexBranches_.clear();
@@ -757,6 +808,7 @@ void dimuonAnalyzer::analyze(const edm::Event& iEvent, const edm::EventSetup& iS
     }
   }
   fillGenMuonBranches(genParticles, genMuonBranches_);
+  fillTrackBranches(displacedSATracks, disStaTrackBranches_);
 
   std::vector<const pat::Muon*> selectedMuons;
   if (muons.isValid()) {
