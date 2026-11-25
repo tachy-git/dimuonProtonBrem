@@ -25,8 +25,10 @@ COMMON = {
 SIGNAL = {
     "npy_directory": "/xrd/store/user/taehee/dimuonProtonBremNpy",
     "output_directory": "/xrd/store/user/taehee/dimuonProtonBrem/sampleGeneration/condor",
-    "category_patterns": ["barrel_m_2.0*_GeV"],
-    "max_chunks_by_lxy": {3300.0: None, 3800.0: None},
+    #"category_patterns": ["barrel_m_2.0*_GeV"],
+    "category_patterns": ["barrel_m_2.0*_GeV","b*1.0*","b*0.5*"],
+    #"max_chunks_by_lxy": {3300.0: None, 3800.0: None},
+    "max_chunks_by_lxy": {0: 100},
     "custom_raw_directory": "/xrd/store/user/taehee/dimuonProtonBrem/sampleGeneration/condor/gen_sim_raw",
     "custom_output_directory": "/xrd/store/user/taehee/dimuonProtonBrem/sampleGeneration/condor",
     "submit_jobs": True,
@@ -35,12 +37,21 @@ SIGNAL = {
 BACKGROUND = {
     "npy_directory": "/xrd/store/user/taehee/dimuonMesonBkgNpy/chunks",
     "output_directory": "/xrd/store/user/taehee/dimuonMesonBkg/sampleGeneration/condor",
-    "category_patterns": ["eta_continuum_HCal"],
+    "category_patterns": [
+        "eta_221_HCal_barrel",
+        "eta_continuum_HCal_barrel",
+        "omega_223_HCal_barrel",
+        "omega_continuum_HCal_barrel",
+        "phi_333_HCal_barrel",
+        "rho_113_HCal_barrel",
+    ],
+    # Continue after the seed range reserved for eta_continuum_HCal.
+    "base_seed": 10_130_042,
     "max_chunks_by_lxy": {1800.0: None},
     "custom_raw_directory": "/xrd/store/user/taehee/dimuonMesonBkg/sampleGeneration/condor/gen_sim_raw",
     "custom_output_directory": "/xrd/store/user/taehee/dimuonMesonBkg/sampleGeneration/condor",
     "submit_jobs": False,
     "source_directory": "/xrd/store/user/taehee/dimuonMesonBkgNpy",
     "chunk_rows": 1000,
-    "max_chunks_per_source": 10,
+    "max_chunks_per_source": 5,
 }

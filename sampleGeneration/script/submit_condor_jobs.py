@@ -272,8 +272,9 @@ def main():
     )
     add_sample_arguments(parser)
     args = parser.parse_args()
-    common = settings.COMMON
+    common = dict(settings.COMMON)
     sample = settings.BACKGROUND if args.background else settings.SIGNAL
+    common["base_seed"] = sample.get("base_seed", common["base_seed"])
     sample_type = "background" if args.background else "signal"
 
     if common["max_events"] == 0 or common["max_events"] < -1:
@@ -289,13 +290,14 @@ def main():
     cmssw15_src = Path(cmssw15_src).expanduser().resolve()
     cmssw16_src = Path(cmssw16_src).expanduser().resolve()
     here = Path(__file__).resolve().parent
-    outdir = (here / Path(sample["output_directory"]).expanduser()).resolve()
+    workflow_root = here.parent
+    outdir = (workflow_root / Path(sample["output_directory"]).expanduser()).resolve()
     if any(character.isspace() for character in str(outdir)):
         raise ValueError(f"output path must not contain whitespace: {outdir}")
     configured_input = sample["npy_directory"]
     if not configured_input:
         parser.error("set DEFAULT_NPY_DIRECTORY in settings.py")
-    inputs = collect_inputs([here / Path(configured_input).expanduser()], sample, sample_type)
+    inputs = collect_inputs([workflow_root / Path(configured_input).expanduser()], sample, sample_type)
 
     selected = inspect_inputs(inputs, sample_type)
     jobs, jobs_by_category_lxy = build_jobs(selected, common, sample, args.max_jobs_per_category)

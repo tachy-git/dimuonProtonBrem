@@ -22,6 +22,19 @@ Invalid files are preserved with an `.invalid.<timestamp>.<pid>` suffix before
 that stage is rerun.  The standard and EXO NanoAOD branches are completed
 independently.
 
+## Directory layout
+
+- `script/`: submission, execution, NPY splitting, and editable settings.
+- `python/`: CMSSW stage configurations and DSA customisation.
+- `plugins/`: C++ producer and CMSSW build dependencies.
+- `test/`: Python workflow tests.
+
+Commands below run from `sampleGeneration/`. Relative production paths in
+settings remain relative to this directory. Old entry points are removed;
+regenerate Condor submission files after updating the checkout. Existing CMSSW
+package links must point to `sampleGeneration/`, rather than its former
+`producer/` subdirectory, and the package must be rebuilt.
+
 ## Producer setup
 
 Link the producer package into `CMSSW_14_0_18` and compile it:
@@ -30,7 +43,7 @@ Link the producer package into `CMSSW_14_0_18` and compile it:
 source /cvmfs/cms.cern.ch/cmsset_default.sh
 cd /path/to/CMSSW_14_0_18/src
 mkdir -p MyAnalyzer
-ln -s /path/to/repository/sampleGeneration/producer \
+ln -s /path/to/repository/sampleGeneration \
   MyAnalyzer/ProtonBremDimuonGunProducer
 cmsenv
 scram b -j 8
@@ -82,7 +95,7 @@ CMSSW releases default to `~/CMSSW_14_0_18/src`, `~/CMSSW_15_0_2/src`, and
 options are needed for these locations.
 
 NPY input defaults to `/xrd/store/user/taehee/dimuonProtonBremNpy` in
-`settings.py`. Inputs use `<category>/Events_<n>.npy`, for example
+`script/settings.py`. Inputs use `<category>/Events_<n>.npy`, for example
 `barrel_m_2.0565123083486516_GeV/Events_0.npy`. `SIGNAL["category_patterns"]`
 filters category directory names, and files are processed in numeric order.
 Old `__chunkNNNN.npy` input filenames are not supported. Every production
@@ -114,7 +127,7 @@ set +a
 ```
 
 Physics settings, input patterns, seeds, and Condor resources are configured in
-`settings.py`. `COMMON` holds release paths, PDG IDs, seeds, resources, and
+`script/settings.py`. `COMMON` holds release paths, PDG IDs, seeds, resources, and
 `max_events`. `SIGNAL` and `BACKGROUND` hold their own input/output paths,
 category patterns, chunk limits, custom paths, and submission flag. Scripts
 select a profile locally; selecting one never changes the other profile.
@@ -122,20 +135,22 @@ Lxy values follow the insertion order of `max_chunks_by_lxy` keys.
 
 ## Job preparation
 
-Set `COMMON["max_events"]`, `SIGNAL["output_directory"]`, and `SIGNAL["submit_jobs"]` in `settings.py`,
+Set `COMMON["max_events"]`, `SIGNAL["output_directory"]`, and `SIGNAL["submit_jobs"]` in `script/settings.py`,
 along with the input, CMSSW paths, and Condor resources. `COMMON["max_events"] = -1`
-processes all events; `SIGNAL["submit_jobs"] = True` submits the generated job set.
+processes all events. The standard GEN-SIM, DIGI-HLT, RECO, MiniAOD and BTV
+NanoAOD configurations always process the complete input; a positive limit
+is applied only by EXO NanoAOD and the custom RECO/MiniAOD wrappers; `SIGNAL["submit_jobs"] = True` submits the generated job set.
 Set `SIGNAL["submit_jobs"] = False` to prepare files without submitting.
 
 ```bash
-./prepare_jobs.py
+./script/submit_condor_jobs.py
 ```
 
 Select the sample profile with `--signal` (default) or `--background`.
 The optional selection override is `--max-jobs-per-category`.
 Input, CMSSW paths, resources, event count, output path, and submission are
-configured exclusively through `settings.py`, without CLI overrides.
-Relative paths are resolved from the script directory.
+configured exclusively through `script/settings.py`, without CLI overrides.
+Relative paths are resolved from the `sampleGeneration/` directory.
 
 By default, all generated files are written under
 `/xrd/store/user/taehee/dimuonProtonBrem/sampleGeneration/condor/`:
@@ -156,31 +171,30 @@ condor/
 The distinct stage output directories let resumed jobs validate
 and skip the BTV and EXO NanoAOD stages independently.
 
-Set `SIGNAL["output_directory"]` in `settings.py` to select a different location.
+Set `SIGNAL["output_directory"]` in `script/settings.py` to select a different location.
 
 ## Custom MiniAOD from existing RAW files
 
-`prepare_custom_miniaod_jobs.py` reads
-`condor/gen_sim_raw/<category>_lxy<tag>/Events_<n>.root` and matches each file
-with its original production job metadata to retain seeds, PDG IDs, and labels.
-CMSSW paths come from the shared settings in `settings.py`.
+`script/submit_custom_miniaod_jobs.py` reads
+`condor/gen_sim_raw/<category>_lxy<tag>/Events_<n>.root`. Seeds are allocated
+from the selected profile base seed in selected RAW order; original production
+seeds are not read from a job list. PDG IDs come from the shared settings.
+CMSSW paths come from the shared settings in `script/settings.py`.
 Both scripts select categories/masses using `SIGNAL["category_patterns"]` and Lxy
 values using `SIGNAL["max_chunks_by_lxy"] keys`. Custom processing selects available RAW chunks
 in numeric order per category/Lxy, subject to the shared
 `SIGNAL["max_chunks_by_lxy"]` (`None` selects all available chunks).
 `--max-jobs-per-category` adds a further cap, as it does for production.
-Unselected categories/Lxy do not require matching production metadata.
-Configure `SIGNAL["custom_raw_directory"]`, `SIGNAL["custom_output_directory"]`, and
-`CUSTOM_PRODUCTION_JOBLIST` there for custom paths. Event count, resources,
+Configure `SIGNAL["custom_raw_directory"]` and `SIGNAL["custom_output_directory"]`
+there for custom paths. Event count, resources,
 CMSSW paths, and submission settings are shared with production.
 
 ```bash
-./prepare_custom_miniaod_jobs.py
+./script/submit_custom_miniaod_jobs.py
 ```
 
 Custom outputs are `condor/aod_custom/<setting>/Events_<n>.root` and
-`condor/miniaod_custom/<setting>/Events_<n>.root`. Existing production metadata
-must be available in `condor/sub/dimuon_proton_brem_jobs.args`. As before, RAW
+`condor/miniaod_custom/<setting>/Events_<n>.root`. RAW
 inputs must be under the selected output base's `gen_sim_raw/<setting>` directory.
 
 ## EXO NanoAOD resolution analysis
@@ -253,17 +267,19 @@ now reference the relocated files.
 The same producer and production stages support both sample types:
 
 ```bash
-./prepare_jobs.py --signal       # default when neither flag is supplied
-./prepare_jobs.py --background
-./prepare_custom_miniaod_jobs.py --background
+./script/submit_condor_jobs.py --signal       # default when neither flag is supplied
+./script/submit_condor_jobs.py --background
+./script/submit_custom_miniaod_jobs.py --background
 ```
 
 `--signal` and `--background` are mutually exclusive. Existing 13-argument
 runner invocations still default to signal; new job lists append the sample type.
-Background settings are independent of the signal profile in `settings.py`:
+Background settings are independent of the signal profile in `script/settings.py`:
 `BACKGROUND["category_patterns"]`, `BACKGROUND["max_chunks_by_lxy"]`,
 `BACKGROUND["npy_directory"]`, `BACKGROUND["output_directory"]`, and
-`BACKGROUND["submit_jobs"]`. The selected category is **eta_continuum_HCal**. Background Lxy defaults to **1800 mm only** and
+`BACKGROUND["submit_jobs"]`. The selected inputs are **eta_221_HCal_barrel, eta_continuum_HCal_barrel,
+omega_223_HCal_barrel, omega_continuum_HCal_barrel, phi_333_HCal_barrel,
+and rho_113_HCal_barrel**. Background Lxy defaults to **1800 mm only** and
 submission defaults to **False**. Job preparation writes submission files;
 set `BACKGROUND["submit_jobs"] = True` to submit them on a later run.
 
@@ -283,17 +299,29 @@ contains exactly two status-1 muons sharing one vertex, without a mother.
 Their four-momenta and the event weight are copied unchanged from NPY.
 
 Prepare 1,000-row NPY chunks using the separate splitting script. The source
-files remain untouched. The default profile selects eta_continuum_HCal and
-at most 10 chunks per original NPY (`BACKGROUND["max_chunks_per_source"]`).
+files remain untouched. The default profile selects the six HCal barrel categories and
+at most 5 chunks (5,000 events) per original NPY (`BACKGROUND["max_chunks_per_source"]`).
 Sources are visited in sorted filename order and empty arrays are skipped:
 
 ```bash
-python3 split_background_npy.py --category eta_continuum_HCal --max-chunks-per-source 10 --dry-run
-python3 split_background_npy.py --category eta_continuum_HCal --max-chunks-per-source 10
+python3 script/split_background_npy.py --dry-run
+python3 script/split_background_npy.py
 ```
 
-This selection creates **2,026 chunks containing 2,015,674 events** from 211
-nonempty originals (75 empty originals are skipped). `--category` may be
+The barrel input directories are produced by `save_dimuon_npy.py` in
+BkgEstimation with parent |eta| < 0.8 and both muons pT > 10 GeV.
+Use their published arrays directly, without adding another eta selection.
+Before creating a production job set, wait for the upstream NPY export to
+finish and confirm the complete expected input-file set in all six categories.
+Final chunk/job and event totals depend on the finished input arrays and are
+printed by the preparation scripts. Each nonempty original contributes at most
+five jobs; empty originals are skipped.
+
+`BACKGROUND["base_seed"] = 10130042` overrides the common base seed for
+background production and custom reconstruction, starting after the original
+eta seed allocation. The common/signal seed remains unchanged.
+
+ `--category` may be
 repeated, and `--max-chunks-per-category` optionally caps the combined chunks
 across originals in each category. Set `BACKGROUND["max_chunks_per_source"] = None`
 to remove the per-source cap. The full source dataset has
@@ -318,16 +346,18 @@ chunk. It verifies new chunks against their source and checks existing chunks
 before reusing them. Conflicting chunks raise an error. The manifest records
 source paths, selected row ranges (stop exclusive), and total source row
 counts; with a cap it describes the selected subset, not the whole dataset.
+When adding categories, manifest rows for unselected sources are retained;
+rows for selected sources are replaced, so rerunning does not duplicate them.
 
 Background CMS outputs use the separate
 `dimuonMesonBkg` storage namespace. Signal output paths remain unchanged.
 CMS outputs use:
 
 ```text
-/xrd/store/user/taehee/dimuonMesonBkg/sampleGeneration/condor_background/
+/xrd/store/user/taehee/dimuonMesonBkg/sampleGeneration/condor/
   <stage>/<category>/<source-stem>_lxy1800/Events_<n>.root
 ```
 
 After changing the C++ producer, copy or link its package into the CMSSW 14
 release and rebuild as described above. Pure Python checks are available with
-`python3 -m unittest discover -s tests -v` (requires NumPy).
+`python3 -m unittest discover -s test -v` (requires NumPy).

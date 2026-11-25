@@ -18,7 +18,7 @@ SAMPLE_TYPE="${14:-signal}"
 case "$SAMPLE_TYPE" in signal|background) ;; *) echo "Invalid sample type: $SAMPLE_TYPE" >&2; exit 1 ;; esac
 
 WORKFLOW_DIR="$(cd "$(dirname "$0")" && pwd)"
-CFG_DIR="${WORKFLOW_DIR}/cfg"
+CFG_DIR="${WORKFLOW_DIR}/../python"
 # Keep the existing Condor argument/label format without a Python path helper.
 if [[ "$LABEL" =~ ^([A-Za-z0-9_.+/-]+)__chunk[0-9]+_lxy([0-9]+(p[0-9]+)?)$ ]] && [[ "$LABEL" != *".."* ]]; then
   SETTING="${BASH_REMATCH[1]}_lxy${BASH_REMATCH[2]}"

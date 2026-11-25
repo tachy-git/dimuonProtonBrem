@@ -8,7 +8,7 @@ import os
 from pathlib import Path
 import numpy as np
 import settings
-from prepare_jobs import inspect_npy
+from submit_condor_jobs import inspect_npy
 
 
 def split_sources(source, output, chunk_rows=1000, dry_run=False, max_chunks_per_category=None, max_chunks_per_source=None, category_patterns=None):
@@ -29,6 +29,20 @@ def split_sources(source, output, chunk_rows=1000, dry_run=False, max_chunks_per
                    if any(fnmatch.fnmatchcase(path.parent.name, pattern) for pattern in patterns))
     if not paths:
         raise ValueError(f"no background NPY files found in {source}")
+    fields = ["source", "output", "row_start", "row_stop", "source_rows"]
+    selected_sources = {str(path.resolve()) for path in paths}
+    preserved = []
+    existing_manifest = output / "npy_chunks_manifest.csv"
+    if existing_manifest.exists():
+        with existing_manifest.open(newline="") as handle:
+            reader = csv.DictReader(handle)
+            if reader.fieldnames != fields:
+                raise ValueError(f"unexpected manifest columns in {existing_manifest}")
+            for record in reader:
+                if set(record) != set(fields) or any(value is None for value in record.values()) or not record['source']:
+                    raise ValueError(f"invalid manifest row in {existing_manifest}")
+                if str(Path(record['source']).resolve()) not in selected_sources:
+                    preserved.append(record)
     total_rows = total_chunks = empty = 0
     if not dry_run:
         output.mkdir(parents=True, exist_ok=True)
@@ -38,7 +52,9 @@ def split_sources(source, output, chunk_rows=1000, dry_run=False, max_chunks_per
             # Keep the last complete manifest until the entire run succeeds.
             manifest = (output / "npy_chunks_manifest.csv.part").open("w", newline="")
             writer = csv.writer(manifest)
-            writer.writerow(["source", "output", "row_start", "row_stop", "source_rows"])
+            writer.writerow(fields)
+            # Retain categories/sources not selected by this invocation.
+            writer.writerows([record[field] for field in fields] for record in preserved)
         for index, path in enumerate(paths):
             category = path.parent.name
             if max_chunks_per_category is not None and selected_by_category[category] >= max_chunks_per_category:

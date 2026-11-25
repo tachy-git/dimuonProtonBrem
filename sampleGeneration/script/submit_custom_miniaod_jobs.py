@@ -11,7 +11,7 @@ import subprocess
 import re
 
 import settings
-from prepare_jobs import (CATEGORY_RE, MAX_RNG_SEED, lxy_tag,
+from submit_condor_jobs import (CATEGORY_RE, MAX_RNG_SEED, lxy_tag,
                           matches_input_patterns, validate_settings, add_sample_arguments, chunk_limit)
 
 
@@ -21,8 +21,9 @@ def main():
     parser.add_argument("--max-jobs-per-category", type=int, help="apply an additional per-category chunk cap to every Lxy value")
     add_sample_arguments(parser)
     args = parser.parse_args()
-    common = settings.COMMON
+    common = dict(settings.COMMON)
     sample = settings.BACKGROUND if args.background else settings.SIGNAL
+    common["base_seed"] = sample.get("base_seed", common["base_seed"])
     sample_type = "background" if args.background else "signal"
     if common["max_events"] == 0 or common["max_events"] < -1:
         parser.error("MAX_EVENTS must be -1 or a positive integer")
@@ -32,7 +33,8 @@ def main():
         raise ValueError("REQUEST_CPUS must be positive and REQUEST_MEMORY must not be empty")
     validate_settings(common["cmssw14_src"], common["cmssw15_src"], common["cmssw16_src"], common, sample)
     here = Path(__file__).resolve().parent
-    outdir = (here / Path(sample["custom_output_directory"]).expanduser()).resolve()
+    workflow_root = here.parent
+    outdir = (workflow_root / Path(sample["custom_output_directory"]).expanduser()).resolve()
     releases = [str(Path(value).expanduser().resolve()) for value in
                 (common["cmssw14_src"], common["cmssw15_src"], common["cmssw16_src"])]
     pattern = "Events_*.root"
@@ -46,7 +48,7 @@ def main():
                 and tag in selected_lxy_tags
                 and matches_input_patterns(Path(path.parent.parent.name) / category / path.name, sample, sample_type))
     inputs = set()
-    for argument in [here / Path(sample["custom_raw_directory"]).expanduser()]:
+    for argument in [workflow_root / Path(sample["custom_raw_directory"]).expanduser()]:
         path = argument.expanduser().resolve()
         if path.is_dir():
             inputs.update(candidate.resolve() for candidate in path.rglob(pattern)
@@ -83,7 +85,7 @@ def main():
         if path != outdir / "gen_sim_raw" / (f"{category}_lxy{tag}") / path.name:
             raise ValueError(f"RAW must be located in CUSTOM_OUTPUT_DIRECTORY/gen_sim_raw/<setting>: {path}")
         input_npy = Path(sample["npy_directory"]).expanduser() / category / path.with_suffix(".npy").name
-        input_npy = (here / input_npy).resolve()
+        input_npy = (workflow_root / input_npy).resolve()
         seed = common["base_seed"] + len(rows) * 5 * common["rng_seed_stride"]
         if seed + 4 * common["rng_seed_stride"] >= MAX_RNG_SEED:
             raise ValueError(f"seed allocation exceeds {MAX_RNG_SEED - 1}; reduce jobs or RNG_SEED_STRIDE")
